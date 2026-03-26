@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Roamies",
+    "slug": "roamies",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.waypoint.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Waypoint uses your location to show you on the group map and to match your photos to trip stops.",
+        "NSPhotoLibraryUsageDescription": "Waypoint reads your camera roll to automatically match your trip photos to days and stops.",
+        "NSPhotoLibraryAddUsageDescription": "Waypoint saves shared trip photos to your camera roll."
+      }
+    },
+    "android": {
+      "package": "com.waypoint.app",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "READ_MEDIA_IMAGES"
+      ]
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "scheme": "waypoint",
+    "newArchEnabled": true,
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

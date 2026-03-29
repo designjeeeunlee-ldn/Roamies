@@ -27,7 +27,23 @@ import { savePhotoToDevice } from '../lib/useSavePhoto';
 import { TRIP_COLORS, parseDatesLabel } from '../components/TripCalendar';
 import { formatTripDates, tripCountdown } from '../lib/dateFormat';
 import ScreenHeader from '../components/ScreenHeader';
+import InlineCalendar, { formatCalendarDate } from '../components/InlineCalendar';
 import type { DbStop, DbTripMemberWithProfile } from '../lib/database.types';
+
+// ── Date helpers ──────────────────────────────────────────────────────────────
+
+function formatDateRange(start: Date | null, end: Date | null): string {
+  if (!start) return '';
+  if (!end) return formatCalendarDate(start);
+  // e.g. "Apr 3, 2025 – Apr 7, 2025"
+  return `${formatCalendarDate(start)} – ${formatCalendarDate(end)}`;
+}
+
+function parseDateRangeFromLabel(label: string): { start: Date | null; end: Date | null } {
+  const result = parseDatesLabel(label);
+  if (!result) return { start: null, end: null };
+  return { start: new Date(result.start), end: new Date(result.end) };
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -80,21 +96,27 @@ export default function TripDetailScreen() {
   // Edit-trip modal state
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [editName, setEditName] = useState('');
-  const [editDates, setEditDates] = useState('');
+  const [editStartDate, setEditStartDate] = useState<Date | null>(null);
+  const [editEndDate, setEditEndDate] = useState<Date | null>(null);
+  const [selectingStart, setSelectingStart] = useState(true);
   const [editSaving, setEditSaving] = useState(false);
 
   const openEditModal = () => {
     setEditName(trip?.name ?? '');
-    setEditDates(trip?.dates_label ?? '');
+    const parsed = parseDateRangeFromLabel(trip?.dates_label ?? '');
+    setEditStartDate(parsed.start);
+    setEditEndDate(parsed.end);
+    setSelectingStart(true);
     setEditModalVisible(true);
   };
 
   const handleSaveEdit = async () => {
     if (!trip || !editName.trim()) return;
     setEditSaving(true);
+    const datesLabel = formatDateRange(editStartDate, editEndDate) || null;
     await updateTrip(trip.id, {
       name: editName.trim(),
-      dates_label: editDates.trim() || null,
+      dates_label: datesLabel,
     });
     setEditSaving(false);
     setEditModalVisible(false);
@@ -418,16 +440,14 @@ export default function TripDetailScreen() {
               </View>
 
               <Text style={styles.drawerFieldLabel}>Dates</Text>
-              <View style={styles.inputWrapper}>
-                <Ionicons name="calendar-outline" size={18} color="#9CA3AF" />
-                <TextInput
-                  style={styles.input}
-                  placeholder="e.g. Apr 3, 2025 – Apr 7, 2025"
-                  placeholderTextColor="#9CA3AF"
-                  value={editDates}
-                  onChangeText={setEditDates}
-                />
-              </View>
+              <InlineCalendar
+                startDate={editStartDate}
+                endDate={editEndDate}
+                onSelectStart={(d) => { setEditStartDate(d); setEditEndDate(null); }}
+                onSelectEnd={(d) => setEditEndDate(d)}
+                selectingStart={selectingStart}
+                onToggleSelecting={() => setSelectingStart((v) => !v)}
+              />
 
               <TouchableOpacity
                 style={[styles.confirmBtn, !editName.trim() && styles.confirmBtnDisabled]}

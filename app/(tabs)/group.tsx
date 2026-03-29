@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,9 @@ import {
   TextInput,
   KeyboardAvoidingView,
   Platform,
+  Animated,
+  useWindowDimensions,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -17,6 +20,8 @@ import { useRouter } from 'expo-router';
 import { useApp } from '../../context/AppContext';
 import ScreenHeader from '../../components/ScreenHeader';
 import { formatTripDates, tripCountdown } from '../../lib/dateFormat';
+import { askClaude } from '../../lib/claude';
+import type { ClaudeMessage } from '../../lib/claude';
 
 // ── Members ───────────────────────────────────────────────────────────────────
 
@@ -132,17 +137,186 @@ function fmt(n: number, currency: Currency) {
   return `${currency.symbol}${converted.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
 }
 
+// ── Drum date picker ─────────────────────────────────────────────────────────
+
+const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const DRUM_ITEM_H = 44;
+const DRUM_VISIBLE = 5;
+
+function DrumColumn({ items, selectedIdx, onSelect, width }: { items: string[]; selectedIdx: number; onSelect: (i: number) => void; width: number }) {
+  const ref = useRef<ScrollView>(null);
+  const [activeIdx, setActiveIdx] = useState(selectedIdx);
+  const firstRender = useRef(true);
+
+  useEffect(() => {
+    setActiveIdx(selectedIdx);
+    const animated = !firstRender.current;
+    const t = setTimeout(() => ref.current?.scrollTo({ y: selectedIdx * DRUM_ITEM_H, animated }), 60);
+    firstRender.current = false;
+    return () => clearTimeout(t);
+  }, [selectedIdx]);
+
+  return (
+    <View style={{ width, height: DRUM_ITEM_H * DRUM_VISIBLE, overflow: 'hidden' }}>
+      <ScrollView
+        ref={ref}
+        showsVerticalScrollIndicator={false}
+        snapToInterval={DRUM_ITEM_H}
+        decelerationRate="fast"
+        contentContainerStyle={{ paddingVertical: DRUM_ITEM_H * 2 }}
+        scrollEventThrottle={16}
+        onScroll={(e) => {
+          const i = Math.max(0, Math.min(Math.round(e.nativeEvent.contentOffset.y / DRUM_ITEM_H), items.length - 1));
+          setActiveIdx(i);
+        }}
+        onMomentumScrollEnd={(e) => {
+          const i = Math.max(0, Math.min(Math.round(e.nativeEvent.contentOffset.y / DRUM_ITEM_H), items.length - 1));
+          setActiveIdx(i);
+          onSelect(i);
+        }}
+      >
+        {items.map((item, i) => (
+          <View key={i} style={{ height: DRUM_ITEM_H, justifyContent: 'center', alignItems: 'center' }}>
+            <Text style={{
+              fontSize: i === activeIdx ? 18 : 14,
+              color: i === activeIdx ? '#1F0A40' : '#C4B5FD',
+              fontWeight: i === activeIdx ? '800' : '400',
+            }}>{item}</Text>
+          </View>
+        ))}
+      </ScrollView>
+    </View>
+  );
+}
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function DrumDateModal({ onClose, onSave, initialStart, initialEnd }: { onClose: () => void; onSave: (s: Date, e: Date) => void; initialStart?: Date | null; initialEnd?: Date | null }) {
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const years = [currentYear, currentYear + 1, currentYear + 2];
+  const [pickingStart, setPickingStart] = useState(true);
+  const [sm, setSm] = useState(initialStart?.getMonth() ?? now.getMonth());
+  const [sd, setSd] = useState((initialStart?.getDate() ?? now.getDate()) - 1);
+  const [sy, setSy] = useState(Math.max(0, years.indexOf(initialStart?.getFullYear() ?? currentYear)));
+  const [em, setEm] = useState(initialEnd?.getMonth() ?? (now.getMonth() + 1) % 12);
+  const [ed, setEd] = useState((initialEnd?.getDate() ?? now.getDate()) - 1);
+  const [ey, setEy] = useState(Math.max(0, years.indexOf(initialEnd?.getFullYear() ?? currentYear)));
+
+  const daysIn = (month: number, yearIdx: number) =>
+    Array.from({ length: new Date(years[yearIdx] ?? currentYear, month + 1, 0).getDate() }, (_, i) => String(i + 1));
+  const startDays = daysIn(sm, sy);
+  const endDays = daysIn(em, ey);
+
+  // Derived day-of-week for the active selection
+  const activeDayName = (() => {
+    const m = pickingStart ? sm : em;
+    const dIdx = pickingStart ? sd : ed;
+    const yIdx = pickingStart ? sy : ey;
+    const days = pickingStart ? startDays : endDays;
+    const dayNum = parseInt(days[dIdx] ?? '1') || 1;
+    return DAY_NAMES[new Date(years[yIdx] ?? currentYear, m, dayNum).getDay()];
+  })();
+
+  const handleSave = () => {
+    const s = new Date(years[sy] ?? currentYear, sm, parseInt(startDays[sd] ?? '1') || 1);
+    const e = new Date(years[ey] ?? currentYear, em, parseInt(endDays[ed] ?? '1') || 1);
+    onSave(s, e);
+  };
+
+  return (
+    <Modal visible transparent animationType="slide">
+      <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' }}>
+        <View style={{ backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 40 }}>
+          <View style={{ width: 36, height: 4, backgroundColor: '#D1D5DB', borderRadius: 2, alignSelf: 'center', marginTop: 12, marginBottom: 16 }} />
+          <Text style={{ textAlign: 'center', fontSize: 17, fontWeight: '800', color: '#111827', marginBottom: 12 }}>Select Dates</Text>
+
+          {/* Departure / Return toggle */}
+          <View style={{ flexDirection: 'row', marginHorizontal: 16, marginBottom: 16, backgroundColor: '#F3F4F6', borderRadius: 12, padding: 4 }}>
+            {(['Departure', 'Return'] as const).map((label, i) => {
+              const active = pickingStart === (i === 0);
+              return (
+                <TouchableOpacity key={label} style={{ flex: 1, paddingVertical: 9, borderRadius: 10, backgroundColor: active ? '#6B3FA0' : 'transparent', alignItems: 'center' }} onPress={() => setPickingStart(i === 0)}>
+                  <Text style={{ fontSize: 14, fontWeight: '700', color: active ? '#FFF' : '#6B7280' }}>{label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* Day-of-week derived label */}
+          <Text style={{ textAlign: 'center', fontSize: 22, fontWeight: '800', color: '#6B3FA0', marginBottom: 4, letterSpacing: 0.3 }}>
+            {activeDayName}
+          </Text>
+
+          {/* Drum columns */}
+          <View style={{ position: 'relative', marginHorizontal: 16 }}>
+            {/* Selection highlight — rendered first so drums appear above */}
+            <View pointerEvents="none" style={{
+              position: 'absolute',
+              top: DRUM_ITEM_H * 2,
+              height: DRUM_ITEM_H,
+              left: 0, right: 0,
+              borderTopWidth: 1.5,
+              borderBottomWidth: 1.5,
+              borderColor: '#6B3FA0',
+              borderRadius: 10,
+            }} />
+            <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
+              <DrumColumn
+                key={`month-${pickingStart ? 'start' : 'end'}`}
+                items={MONTHS_SHORT}
+                selectedIdx={pickingStart ? sm : em}
+                onSelect={pickingStart ? setSm : setEm}
+                width={88}
+              />
+              <DrumColumn
+                key={`day-${pickingStart ? 'start' : 'end'}`}
+                items={pickingStart ? startDays : endDays}
+                selectedIdx={pickingStart ? sd : ed}
+                onSelect={pickingStart ? setSd : setEd}
+                width={56}
+              />
+              <DrumColumn
+                key={`year-${pickingStart ? 'start' : 'end'}`}
+                items={years.map(String)}
+                selectedIdx={pickingStart ? sy : ey}
+                onSelect={pickingStart ? setSy : setEy}
+                width={80}
+              />
+            </View>
+          </View>
+
+          <TouchableOpacity style={{ marginHorizontal: 16, marginTop: 20, backgroundColor: '#6B3FA0', borderRadius: 14, paddingVertical: 14, alignItems: 'center' }} onPress={handleSave}>
+            <Text style={{ color: '#FFF', fontSize: 16, fontWeight: '700' }}>Save Dates</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={{ alignItems: 'center', paddingTop: 12 }} onPress={onClose}>
+            <Text style={{ color: '#9CA3AF', fontSize: 14 }}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function formatDrumDateRange(start: Date, end: Date): string {
+  const opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
+  return `${start.toLocaleDateString('en-US', opts)} – ${end.toLocaleDateString('en-US', opts)}, ${end.getFullYear()}`;
+}
+
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 export default function GroupScreen() {
   const router = useRouter();
+  const { height: screenHeight } = useWindowDimensions();
   const {
     userId,
     profile,
     activeTrip,
+    todayStops,
     members: liveMembers,
     expenses: liveExpenses,
     addExpense: saveExpense,
+    updateTrip,
   } = useApp();
 
   const [petFriendly, setPetFriendly] = useState(true);
@@ -158,12 +332,94 @@ export default function GroupScreen() {
   // The current user's ID for "me" in balance calculations
   const MY_ID_LIVE = userId ?? MY_ID;
 
+  // ── Plan with AI panel state ──
+  type MiniMsg = { id: string; role: 'user' | 'ai'; text: string };
+  const [chatOpen, setChatOpen] = useState(true);
+  const [miniInput, setMiniInput] = useState('');
+  const [miniMessages, setMiniMessages] = useState<MiniMsg[]>([]);
+  const [miniTyping, setMiniTyping] = useState(false);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(true);
+  const miniScrollRef = useRef<ScrollView>(null);
+  const chatPanelExpanded = screenHeight * 0.46;
+  const chatPanelCollapsed = 56;
+  const chatHeightAnim = useRef(new Animated.Value(chatPanelExpanded)).current;
+
+  useEffect(() => {
+    Animated.spring(chatHeightAnim, {
+      toValue: chatOpen ? chatPanelExpanded : chatPanelCollapsed,
+      useNativeDriver: false,
+      friction: 8,
+      tension: 60,
+    }).start();
+  }, [chatOpen, chatPanelExpanded]);
+
+  const sendMiniMessage = async (text?: string) => {
+    const content = (text ?? miniInput).trim();
+    if (!content || miniTyping) return;
+    setMiniInput('');
+    setMiniTyping(true);
+    const userMsg: MiniMsg = { id: `u_${Date.now()}`, role: 'user', text: content };
+    setMiniMessages((prev) => [...prev, userMsg]);
+    setTimeout(() => miniScrollRef.current?.scrollToEnd({ animated: true }), 80);
+
+    try {
+      const stopList = todayStops.length > 0
+        ? todayStops.map((s) => `- ${s.time}: ${s.place_name}`).join('\n')
+        : 'No stops planned yet.';
+      const system = `You are Roamie, a warm travel companion. Trip: ${activeTrip?.name ?? 'a group trip'}. Dates: ${activeTrip?.dates_label ?? 'unknown'}. Today's plan:\n${stopList}\n\nReply conversationally in 1-3 sentences. Be friendly and specific. No markdown.`;
+      const history: ClaudeMessage[] = miniMessages.map((m) => ({
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.text,
+      }));
+      history.push({ role: 'user', content });
+      const reply = await askClaude(system, history, 256);
+      setMiniMessages((prev) => [...prev, { id: `a_${Date.now()}`, role: 'ai', text: reply }]);
+    } catch {
+      setMiniMessages((prev) => [...prev, { id: `a_${Date.now()}`, role: 'ai', text: "I couldn't connect right now — try the full chat." }]);
+    }
+    setMiniTyping(false);
+    setTimeout(() => miniScrollRef.current?.scrollToEnd({ animated: true }), 80);
+  };
+
+  // ── Trip Set Up tile state ──
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [tripName, setTripName] = useState(activeTrip?.name ?? '');
+  const [tripThemes, setTripThemes] = useState<string[]>([]);
+  const [themeInput, setThemeInput] = useState('');
+
+  useEffect(() => {
+    if (activeTrip?.name) setTripName(activeTrip.name);
+  }, [activeTrip?.name]);
+
+  const [showDateDrum, setShowDateDrum] = useState(false);
+  const [drumStart, setDrumStart] = useState<Date | null>(null);
+  const [drumEnd, setDrumEnd] = useState<Date | null>(null);
+
+  const addTheme = () => {
+    const val = themeInput.trim().replace(/^#/, '');
+    if (val && !tripThemes.includes(val) && tripThemes.length < 3) {
+      setTripThemes((prev) => [...prev, val]);
+    }
+    setThemeInput('');
+  };
+
+  const removeTheme = (tag: string) => {
+    setTripThemes((prev) => prev.filter((t) => t !== tag));
+  };
+
+  const handleSaveSetup = async () => {
+    if (!activeTrip) return;
+    await updateTrip(activeTrip.id, {
+      name: tripName.trim(),
+      dates_label: activeTrip?.dates_label ?? null,
+    });
+  };
+
   // Add expense modal state
   const [showAdd, setShowAdd] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [showEditTrip, setShowEditTrip] = useState(false);
   const [editField, setEditField] = useState<'name' | 'dates'>('name');
-  const [tripName, setTripName] = useState('');
   const [tripDates, setTripDates] = useState('');
   const [editValue, setEditValue] = useState('');
   const [inviteEmail, setInviteEmail] = useState('');
@@ -252,53 +508,125 @@ export default function GroupScreen() {
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
-        {/* ── AI Co-Planner ── */}
-        <TouchableOpacity
-          style={styles.aiCard}
-          activeOpacity={0.85}
-          onPress={() => router.push('/(tabs)/ai')}
-        >
-          <View style={styles.aiCardLeft}>
-            <View style={styles.aiIcon}>
-              <Ionicons name="flash" size={18} color="#FFFFFF" />
+        {/* ── Plan with AI Foldable Panel ── */}
+        <Animated.View style={[styles.aiPanel, { height: chatHeightAnim }]}>
+          {/* Panel header */}
+          <View style={styles.aiPanelHeader}>
+            <View style={styles.aiPanelHeaderLeft}>
+              <View style={styles.aiIcon}>
+                <Ionicons name="flash" size={16} color="#FFFFFF" />
+              </View>
+              <Text style={styles.aiPanelTitle}>Plan with AI ✦</Text>
             </View>
-            <View style={styles.aiCardText}>
-              <Text style={styles.aiCardTitle}>Plan with AI ✦</Text>
-              <Text style={styles.aiCardSub}>Suggestions, timing checks, drop in a booking PDF</Text>
-            </View>
-          </View>
-          <Ionicons name="chevron-forward" size={16} color="#6B3FA0" />
-        </TouchableOpacity>
-
-        {/* ── Trip Members ── */}
-        <View style={styles.section}>
-          <View style={styles.sectionRow}>
-            <Text style={styles.sectionTitle}>Trip Members</Text>
-            <Text style={styles.travelingBadge}>{members.length} Traveling</Text>
+            <TouchableOpacity
+              onPress={() => setChatOpen((v) => !v)}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              activeOpacity={0.7}
+            >
+              <Ionicons
+                name={chatOpen ? 'chevron-up' : 'chevron-down'}
+                size={20}
+                color="#6B3FA0"
+              />
+            </TouchableOpacity>
           </View>
 
-          {members.map((member) => (
-            <View key={member.id} style={styles.memberCard}>
-              <View style={[styles.memberAvatar, { backgroundColor: member.color }]}>
-                <Text style={styles.memberAvatarText}>{member.initials}</Text>
-              </View>
-              <View style={styles.memberInfo}>
-                <Text style={styles.memberName}>{member.name}</Text>
-                <Text style={styles.memberRole}>{member.role.toUpperCase()}</Text>
-              </View>
-              <View style={styles.memberRight}>
-                <View style={[styles.statusBadge, styles.statusOff]}>
-                  <Text style={[styles.statusText, styles.statusTextOff]}>MEMBER</Text>
-                </View>
-              </View>
-            </View>
-          ))}
+          {/* Expanded content */}
+          {chatOpen && (
+            <View style={styles.aiPanelContent}>
 
-          <TouchableOpacity style={styles.inviteButton} activeOpacity={0.8} onPress={() => setShowInvite(true)}>
-            <Ionicons name="person-add-outline" size={18} color="#6B3FA0" />
-            <Text style={styles.inviteText}>Invite Member</Text>
-          </TouchableOpacity>
-        </View>
+              {/* ── Message history ── */}
+              <ScrollView
+                ref={miniScrollRef}
+                style={{ flex: 1 }}
+                contentContainerStyle={{ paddingHorizontal: 12, paddingVertical: 8, gap: 8 }}
+                showsVerticalScrollIndicator={false}
+              >
+                {miniMessages.length === 0 && (
+                  <Text style={styles.miniEmptyText}>Ask anything about your trip ✦</Text>
+                )}
+                {miniMessages.map((msg) => (
+                  <View key={msg.id} style={msg.role === 'user' ? styles.miniUserRow : styles.miniAiRow}>
+                    {msg.role === 'ai' && (
+                      <View style={styles.miniAiAvatar}>
+                        <Ionicons name="flash" size={10} color="#FFF" />
+                      </View>
+                    )}
+                    <View style={[styles.miniMsgBubble, msg.role === 'user' ? styles.miniUserBubble : styles.miniAiBubble]}>
+                      <Text style={msg.role === 'user' ? styles.miniUserText : styles.miniAiText}>{msg.text}</Text>
+                    </View>
+                  </View>
+                ))}
+                {miniTyping && (
+                  <View style={styles.miniAiRow}>
+                    <View style={styles.miniAiAvatar}>
+                      <Ionicons name="flash" size={10} color="#FFF" />
+                    </View>
+                    <View style={[styles.miniMsgBubble, styles.miniAiBubble]}>
+                      <Text style={styles.miniAiText}>•••</Text>
+                    </View>
+                  </View>
+                )}
+              </ScrollView>
+
+              {/* ── Suggestions (collapsible) ── */}
+              <View style={styles.miniSuggestSection}>
+                <TouchableOpacity
+                  style={styles.miniSuggestToggle}
+                  onPress={() => setSuggestionsOpen((v) => !v)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.miniSuggestLabel}>Suggestions</Text>
+                  <Ionicons name={suggestionsOpen ? 'chevron-down' : 'chevron-up'} size={13} color="#9CA3AF" />
+                </TouchableOpacity>
+                {suggestionsOpen && (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.miniChipsRow}
+                  >
+                    {['Pet-friendly cafes', 'Best leave time', 'Dinner spots', 'Weather today'].map((chip) => (
+                      <TouchableOpacity
+                        key={chip}
+                        style={styles.miniChip}
+                        activeOpacity={0.8}
+                        onPress={() => sendMiniMessage(chip)}
+                      >
+                        <Text style={styles.miniChipText}>{chip}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                )}
+              </View>
+
+              {/* ── Input row ── */}
+              <View style={styles.aiInputRow}>
+                <TextInput
+                  style={styles.aiInput}
+                  placeholder="Ask Roamie anything…"
+                  placeholderTextColor="#9CA3AF"
+                  value={miniInput}
+                  onChangeText={setMiniInput}
+                  returnKeyType="send"
+                  onSubmitEditing={() => sendMiniMessage()}
+                  editable={!miniTyping}
+                />
+                <TouchableOpacity
+                  style={[styles.aiSendBtn, (!miniInput.trim() || miniTyping) && { opacity: 0.4 }]}
+                  activeOpacity={0.85}
+                  onPress={() => sendMiniMessage()}
+                  disabled={!miniInput.trim() || miniTyping}
+                >
+                  <Ionicons name="send" size={16} color="#FFFFFF" />
+                </TouchableOpacity>
+              </View>
+
+            </View>
+          )}
+        </Animated.View>
+
+        {/* Drag handle */}
+        <View style={styles.dragHandle} />
 
         {/* ── Activity Feed ── */}
         <View style={styles.section}>
@@ -493,43 +821,132 @@ export default function GroupScreen() {
           </View>
         </View>
 
-        {/* ── Trip Settings ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Trip Settings</Text>
-          <View style={styles.configCard}>
-            <TouchableOpacity style={styles.configRow} activeOpacity={0.7} onPress={() => { setEditField('name'); setEditValue(displayTripName); setShowEditTrip(true); }}>
-              <View style={styles.configContent}>
-                <Text style={styles.configLabel}>TRIP NAME</Text>
-                <Text style={styles.configValue}>{tripName || displayTripName}</Text>
-              </View>
-              <Ionicons name="pencil-outline" size={18} color="#9CA3AF" />
-            </TouchableOpacity>
-            <View style={styles.configDivider} />
-            <TouchableOpacity style={styles.configRow} activeOpacity={0.7} onPress={() => { setEditField('dates'); setEditValue(displayTripDates); setShowEditTrip(true); }}>
-              <View style={styles.configContent}>
-                <Text style={styles.configLabel}>DATES</Text>
-                <Text style={styles.configValue}>{tripDates || displayTripDates}</Text>
-              </View>
-              <Ionicons name="calendar-outline" size={18} color="#9CA3AF" />
-            </TouchableOpacity>
-            <View style={styles.configDivider} />
-            <View style={styles.configRow}>
-              <View style={styles.configContent}>
-                <Text style={styles.configValue}>Pet Friendly Planning</Text>
-                <Text style={styles.configSub}>Show dog-friendly trails & stays</Text>
-              </View>
-              <Switch
-                value={petFriendly}
-                onValueChange={setPetFriendly}
-                trackColor={{ false: '#D1D5DB', true: '#6B3FA0' }}
-                thumbColor="#FFFFFF"
-              />
+        {/* ── Trip Set Up ── */}
+        <View style={styles.setupTile}>
+          <TouchableOpacity
+            style={styles.setupTileHeader}
+            onPress={() => setSetupOpen((v) => !v)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.setupTileTitle}>Trip Set Up</Text>
+            <View style={styles.memberCountBadge}>
+              <Text style={styles.memberCountBadgeText}>{members.length} members</Text>
             </View>
-          </View>
+            <Ionicons name={setupOpen ? 'chevron-up' : 'chevron-down'} size={18} color="#6B3FA0" />
+          </TouchableOpacity>
+
+          {setupOpen && (
+            <View style={styles.setupTileBody}>
+              {/* Trip Name */}
+              <Text style={styles.setupSectionLabel}>TRIP NAME</Text>
+              <TextInput
+                style={styles.setupTextInput}
+                value={tripName}
+                onChangeText={setTripName}
+                placeholder="Name your trip"
+                placeholderTextColor="#9CA3AF"
+              />
+
+              <View style={styles.setupDivider} />
+
+              {/* Dates */}
+              <Text style={styles.setupSectionLabel}>DATES</Text>
+              <View style={styles.setupDatesRow}>
+                <Text style={styles.setupDatesValue}>
+                  {drumStart && drumEnd ? formatDrumDateRange(drumStart, drumEnd) : displayTripDates}
+                </Text>
+                <TouchableOpacity
+                  style={styles.setupChangeDatesBtn}
+                  onPress={() => setShowDateDrum(true)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.setupChangeDatesBtnText}>Change dates</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.setupDivider} />
+
+              {/* Vibes */}
+              <Text style={styles.setupSectionLabel}>TRIP VIBES</Text>
+              <View style={styles.tagChipsRow}>
+                {tripThemes.map((tag) => (
+                  <View key={tag} style={styles.tagChip}>
+                    <Text style={styles.tagChipText}>#{tag}</Text>
+                    <TouchableOpacity onPress={() => removeTheme(tag)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <Ionicons name="close" size={14} color="#6B3FA0" />
+                    </TouchableOpacity>
+                  </View>
+                ))}
+                {tripThemes.length < 3 && (
+                  <View style={styles.tagInputRow}>
+                    <Text style={styles.tagInputHash}>#</Text>
+                    <TextInput
+                      style={styles.tagInput}
+                      value={themeInput}
+                      onChangeText={setThemeInput}
+                      placeholder="add vibe"
+                      placeholderTextColor="#C4B5FD"
+                      returnKeyType="done"
+                      onSubmitEditing={addTheme}
+                    />
+                  </View>
+                )}
+              </View>
+
+              <View style={styles.setupDivider} />
+
+              {/* Pet Friendly */}
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Text style={[styles.setupFieldLabel, { flex: 1 }]}>Pet-friendly options</Text>
+                <Switch
+                  value={petFriendly}
+                  onValueChange={setPetFriendly}
+                  trackColor={{ false: '#E5E7EB', true: '#C4B5FD' }}
+                  thumbColor={petFriendly ? '#6B3FA0' : '#9CA3AF'}
+                />
+              </View>
+
+              <View style={styles.setupDivider} />
+
+              {/* Members */}
+              <Text style={styles.setupSectionLabel}>MEMBERS</Text>
+              {members.map((m) => (
+                <View key={m.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <View style={[styles.memberAvatar, { width: 34, height: 34, borderRadius: 17, backgroundColor: m.color }]}>
+                    <Text style={styles.memberAvatarText}>{m.initials}</Text>
+                  </View>
+                  <Text style={{ flex: 1, fontSize: 14, color: '#111827', fontWeight: '600' }}>{m.name}</Text>
+                  <Text style={{ fontSize: 11, color: '#9CA3AF', fontWeight: '600', letterSpacing: 0.4 }}>{m.role}</Text>
+                </View>
+              ))}
+              <TouchableOpacity
+                style={styles.inviteButton}
+                onPress={() => setShowInvite(true)}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="person-add-outline" size={18} color="#6B3FA0" />
+                <Text style={styles.inviteText}>Invite someone</Text>
+              </TouchableOpacity>
+
+              {/* Save */}
+              <TouchableOpacity style={styles.setupSaveBtn} onPress={handleSaveSetup} activeOpacity={0.85}>
+                <Text style={styles.setupSaveBtnText}>Save Changes</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
 
         <View style={{ height: 32 }} />
       </ScrollView>
+
+      {showDateDrum && (
+        <DrumDateModal
+          initialStart={drumStart}
+          initialEnd={drumEnd}
+          onClose={() => setShowDateDrum(false)}
+          onSave={(s, e) => { setDrumStart(s); setDrumEnd(e); setShowDateDrum(false); }}
+        />
+      )}
 
       {/* ── Add Expense Modal ── */}
       <Modal visible={showAdd} animationType="slide" transparent presentationStyle="overFullScreen">
@@ -785,27 +1202,337 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 17, fontWeight: '700', color: '#111827' },
   headerTripName: { flex: 1, fontSize: 17, fontWeight: '800', color: '#111827' },
 
-  aiCard: {
+  // ── Plan with AI panel ────────────────────────────────────────────────────
+  aiPanel: {
+    backgroundColor: '#FFFFFF',
+    overflow: 'hidden',
+    borderBottomWidth: 1,
+    borderBottomColor: '#EDE9F8',
+    shadowColor: '#6B3FA0',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+    marginHorizontal: -16,
+  },
+  aiPanelHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FDFCFF',
-    borderRadius: 20,
-    padding: 16,
-    marginHorizontal: 20,
-    marginTop: 16,
-    borderWidth: 1.5,
-    borderColor: '#DDD6F3',
-    gap: 12,
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    height: 56,
   },
-  aiCardLeft: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  aiPanelHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  aiPanelTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#111827',
+  },
   aiIcon: {
-    width: 40, height: 40, borderRadius: 20,
+    width: 34, height: 34, borderRadius: 17,
     backgroundColor: '#6B3FA0',
     alignItems: 'center', justifyContent: 'center', flexShrink: 0,
   },
-  aiCardText: { flex: 1, gap: 2 },
-  aiCardTitle: { fontSize: 15, fontWeight: '800', color: '#111827' },
-  aiCardSub: { fontSize: 12, color: '#6B7280', lineHeight: 17 },
+  aiPanelContent: {
+    flex: 1,
+    paddingBottom: 12,
+    paddingHorizontal: 0,
+  },
+
+  // Mini chat messages
+  miniEmptyText: {
+    textAlign: 'center',
+    color: '#C4B5FD',
+    fontSize: 13,
+    fontWeight: '500',
+    marginTop: 24,
+  },
+  miniUserRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+  },
+  miniAiRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  miniAiAvatar: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#6B3FA0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    marginBottom: 2,
+  },
+  miniMsgBubble: {
+    maxWidth: '80%',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  miniUserBubble: {
+    backgroundColor: '#6B3FA0',
+    borderBottomRightRadius: 4,
+  },
+  miniAiBubble: {
+    backgroundColor: '#F3F0FA',
+    borderBottomLeftRadius: 4,
+  },
+  miniUserText: {
+    fontSize: 13,
+    color: '#FFFFFF',
+    lineHeight: 18,
+  },
+  miniAiText: {
+    fontSize: 13,
+    color: '#1F0A40',
+    lineHeight: 18,
+  },
+
+  // Suggestions section
+  miniSuggestSection: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#EDE9F8',
+    paddingTop: 6,
+    paddingBottom: 4,
+  },
+  miniSuggestToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 14,
+    paddingBottom: 5,
+  },
+  miniSuggestLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#9CA3AF',
+    letterSpacing: 0.3,
+  },
+  miniChipsRow: {
+    paddingHorizontal: 12,
+    gap: 6,
+    paddingBottom: 2,
+  },
+  miniChip: {
+    backgroundColor: '#F5F0FF',
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+  },
+  miniChipText: {
+    fontSize: 12,
+    color: '#6B3FA0',
+    fontWeight: '600',
+  },
+
+  aiInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 6,
+  },
+  aiInput: {
+    flex: 1,
+    backgroundColor: '#F9FAFB',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 22,
+    paddingHorizontal: 14,
+    height: 38,
+    fontSize: 14,
+    color: '#111827',
+  },
+  aiSendBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#6B3FA0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  aiFullChatLink: {
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
+  aiFullChatLinkText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#6B3FA0',
+  },
+
+  // Drag handle
+  dragHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#D1D5DB',
+    alignSelf: 'center',
+    marginVertical: 8,
+  },
+
+  // ── Trip Set Up tile ──────────────────────────────────────────────────────
+  setupTile: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  setupTileHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+  },
+  setupTileTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#111827',
+    flex: 1,
+  },
+  memberCountBadge: {
+    backgroundColor: '#EDE9F8',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginRight: 4,
+  },
+  memberCountBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6B3FA0',
+  },
+  setupTileBody: {
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+    gap: 10,
+  },
+  setupSectionLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#9CA3AF',
+    letterSpacing: 0.8,
+    marginBottom: 2,
+  },
+  setupDivider: {
+    height: 1,
+    backgroundColor: '#F3F4F6',
+    marginVertical: 4,
+  },
+  setupFieldLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6B7280',
+    letterSpacing: 0.3,
+  },
+  setupFieldDesc: {
+    fontSize: 12,
+    color: '#9CA3AF',
+    marginTop: -4,
+  },
+  setupTextInput: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 15,
+    color: '#111827',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  setupDatesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  setupDatesValue: {
+    flex: 1,
+    fontSize: 14,
+    color: '#374151',
+    fontWeight: '500',
+  },
+  setupChangeDatesBtn: {
+    backgroundColor: '#EDE9F8',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  setupChangeDatesBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#6B3FA0',
+  },
+  tagChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  tagChip: {
+    backgroundColor: '#EDE9F8',
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  tagChipText: {
+    fontSize: 13,
+    color: '#6B3FA0',
+    fontWeight: '600',
+  },
+  tagChipRemove: {
+    fontSize: 16,
+    color: '#6B3FA0',
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  tagInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EDE9F8',
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    gap: 2,
+  },
+  tagInputHash: {
+    fontSize: 13,
+    color: '#6B3FA0',
+    fontWeight: '700',
+  },
+  tagInput: {
+    minWidth: 60,
+    fontSize: 13,
+    color: '#111827',
+    paddingVertical: 0,
+  },
+  setupSaveBtn: {
+    backgroundColor: '#6B3FA0',
+    borderRadius: 14,
+    paddingVertical: 13,
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  setupSaveBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+
   avatarBtn: {
     width: 34, height: 34, borderRadius: 17,
     backgroundColor: '#6B3FA0',

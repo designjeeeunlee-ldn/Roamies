@@ -244,36 +244,63 @@ export default function ProfileScreen() {
         <View style={styles.section}>
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>Past Travels</Text>
-            <TouchableOpacity activeOpacity={0.7}>
-              <Text style={styles.seeAllText}>See all</Text>
-            </TouchableOpacity>
           </View>
 
-          <View style={styles.tripsList}>
-            {PAST_TRIPS.map((trip) => (
-              <TouchableOpacity key={trip.id} style={styles.tripCard} activeOpacity={0.8} onPress={() => router.push(`/trip-detail?id=${trip.id}` as any)}>
-                {/* Colour bar */}
-                <View style={styles.tripBar} />
+          {pastTrips.length === 0 && PAST_TRIPS.length === 0 ? (
+            <View style={styles.emptyTripsCard}>
+              <Ionicons name="map-outline" size={24} color="#6B3FA0" />
+              <Text style={styles.emptyTripsText}>No past trips yet</Text>
+              <Text style={styles.emptyTripsSub}>Completed trips will appear here</Text>
+            </View>
+          ) : (
+            <View style={styles.tripsList}>
+              {(pastTrips.length > 0 ? pastTrips : PAST_TRIPS).map((trip, idx) => {
+                const isReal = pastTrips.length > 0;
+                const color = TRIP_COLORS[idx % TRIP_COLORS.length];
+                const datesLabel = 'dates_label' in trip ? trip.dates_label : (trip as any).dates;
+                return (
+                  <View key={trip.id} style={styles.pastTripCard}>
+                    <View style={[styles.tripBar, { backgroundColor: color }]} />
+                    <View style={styles.tripInfo}>
+                      <Text style={styles.tripName}>{trip.name}</Text>
+                      {!!datesLabel && <Text style={styles.tripDates}>{datesLabel}</Text>}
+                      {'stops' in trip && (
+                        <View style={styles.tripMeta}>
+                          <View style={styles.tripMetaItem}>
+                            <Ionicons name="location-outline" size={12} color="#9CA3AF" />
+                            <Text style={styles.tripMetaText}>{(trip as any).stops} stops</Text>
+                          </View>
+                          <View style={styles.tripMetaItem}>
+                            <Ionicons name="images-outline" size={12} color="#9CA3AF" />
+                            <Text style={styles.tripMetaText}>{(trip as any).photos} photos</Text>
+                          </View>
+                        </View>
+                      )}
+                    </View>
 
-                <View style={styles.tripInfo}>
-                  <Text style={styles.tripName}>{trip.name}</Text>
-                  <Text style={styles.tripDates}>{trip.dates}</Text>
-                  <View style={styles.tripMeta}>
-                    <View style={styles.tripMetaItem}>
-                      <Ionicons name="location-outline" size={12} color="#9CA3AF" />
-                      <Text style={styles.tripMetaText}>{trip.stops} stops</Text>
-                    </View>
-                    <View style={styles.tripMetaItem}>
-                      <Ionicons name="images-outline" size={12} color="#9CA3AF" />
-                      <Text style={styles.tripMetaText}>{trip.photos} photos</Text>
-                    </View>
+                    {/* Route map button — only for real DB trips */}
+                    {isReal && (
+                      <TouchableOpacity
+                        style={styles.routeBtn}
+                        activeOpacity={0.8}
+                        onPress={() =>
+                          router.push({
+                            pathname: '/past-trip-route',
+                            params: { id: trip.id, name: trip.name, dates: datesLabel ?? '' },
+                          })
+                        }
+                      >
+                        <Ionicons name="map" size={15} color="#6B3FA0" />
+                        <Text style={styles.routeBtnText}>Route</Text>
+                      </TouchableOpacity>
+                    )}
+
+                    <Ionicons name="chevron-forward" size={16} color="#D1D5DB" />
                   </View>
-                </View>
-
-                <Ionicons name="chevron-forward" size={16} color="#D1D5DB" />
-              </TouchableOpacity>
-            ))}
-          </View>
+                );
+              })}
+            </View>
+          )}
         </View>
 
         {/* Settings */}
@@ -616,6 +643,32 @@ statusLabel: { fontSize: 13, fontWeight: '600', color: '#6B7280' },
     paddingVertical: 14,
     gap: 14,
   },
+  pastTripCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+    paddingRight: 12,
+    paddingVertical: 14,
+    gap: 12,
+  },
+  routeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#EDE9F8',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexShrink: 0,
+  },
+  routeBtnText: { fontSize: 12, fontWeight: '700', color: '#6B3FA0' },
   tripBar: { width: 4, alignSelf: 'stretch', borderRadius: 2, backgroundColor: '#6B3FA0' },
   upcomingBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 },
   upcomingBadgeText: { fontSize: 12, fontWeight: '700' },

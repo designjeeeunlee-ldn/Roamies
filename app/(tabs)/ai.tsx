@@ -9,11 +9,19 @@ import {
   KeyboardAvoidingView,
   Platform,
   Animated,
+  Alert,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
+import * as Location from 'expo-location';
+// expo-file-system is not available on web — lazy-load only on native
+const FileSystem = Platform.OS !== 'web'
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  ? require('expo-file-system/legacy')
+  : null;
 import { useApp } from '../../context/AppContext';
 import { supabase } from '../../lib/supabase';
 import { askClaude } from '../../lib/claude';
@@ -38,7 +46,17 @@ type Attachment = {
   mimeType: string;
 };
 
-type VoteOption = { text: string; votes: number };
+type VoteOption = {
+  text: string;          // fallback plain text
+  name?: string;
+  description?: string;
+  rating?: number;
+  address?: string;
+  category?: string;
+  coords?: { lat: number; lng: number };
+  travelTime?: string;
+  votes: number;
+};
 
 type Message =
   | { id: string; dbId?: string; type: 'proactive'; text: string }
@@ -56,19 +74,55 @@ function parseOptions(text: string): { intro: string; options: string[] } | null
   let inOptions = false;
 
   for (const line of lines) {
-    const match = line.trim().match(/^\d+\.\s+(.+)/);
+    // Handle "1.", "1)", "**1.**", "**1.**", "- 1." etc.
+    const stripped = line.trim().replace(/\*\*/g, '');
+    const match = stripped.match(/^(\d+)[.)]\s+(.+)/) ?? stripped.match(/^[-•]\s*(\d+)[.)]\s+(.+)/);
     if (match) {
       inOptions = true;
-      optionLines.push(match[1].trim());
+      optionLines.push(match[2].trim());
     } else if (!inOptions && line.trim()) {
-      introLines.push(line.trim());
+      introLines.push(line.trim().replace(/\*\*/g, ''));
+    } else if (inOptions && line.trim() && !line.trim().match(/^\d/)) {
+      // Continuation of last option (multi-line)
+      if (optionLines.length > 0) {
+        optionLines[optionLines.length - 1] += ' ' + line.trim().replace(/\*\*/g, '');
+      }
     }
   }
 
   if (optionLines.length >= 2) {
-    return { intro: introLines.join(' ').trim(), options: optionLines };
+    return { intro: introLines.join(' ').trim(), options: optionLines.slice(0, 3) };
   }
   return null;
+}
+
+// ── Rich card helpers ─────────────────────────────────────────────────────────
+
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function formatDistance(km: number): string {
+  if (km < 0.15) return `${Math.round(km * 1000)}m away`;
+  if (km < 1) return `~${Math.round(km * 1000 / 80)} min walk`;
+  return `~${Math.round(km / 0.08 / 60 > 1 ? km / 50 * 60 : km * 1000 / 80)} min · ${km.toFixed(1)}km`;
+}
+
+function categoryStyle(category?: string): { icon: string; color: string } {
+  const cat = (category ?? '').toLowerCase();
+  if (cat.includes('café') || cat.includes('cafe') || cat.includes('coffee') || cat.includes('breakfast') || cat.includes('brunch')) return { icon: 'cafe-outline', color: '#C4956A' };
+  if (cat.includes('restaurant') || cat.includes('dining') || cat.includes('food') || cat.includes('lunch') || cat.includes('dinner')) return { icon: 'restaurant-outline', color: '#D4895A' };
+  if (cat.includes('bar') || cat.includes('pub') || cat.includes('cocktail')) return { icon: 'wine-outline', color: '#7B9EB5' };
+  if (cat.includes('museum') || cat.includes('gallery') || cat.includes('art') || cat.includes('culture')) return { icon: 'library-outline', color: '#6B3FA0' };
+  if (cat.includes('park') || cat.includes('nature') || cat.includes('outdoor') || cat.includes('hike')) return { icon: 'leaf-outline', color: '#3D7A52' };
+  if (cat.includes('spa') || cat.includes('wellness') || cat.includes('bath') || cat.includes('thermal')) return { icon: 'water-outline', color: '#1A5F7A' };
+  if (cat.includes('hotel') || cat.includes('accommodation') || cat.includes('hostel')) return { icon: 'bed-outline', color: '#2B7A6E' };
+  if (cat.includes('shop') || cat.includes('market') || cat.includes('store')) return { icon: 'bag-outline', color: '#8B7355' };
+  return { icon: 'location-outline', color: '#6B7280' };
 }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
@@ -94,9 +148,18 @@ function dbMsgToUiMsg(msg: DbAiMessage, votes: DbAiVote[], userId: string | null
   const msgVotes = votes.filter((v) => v.message_id === msg.id);
   switch (msg.type) {
     case 'ai_vote': {
-      const optionTexts = (msg.options ?? []) as { text: string }[];
-      const { options, myVote } = dbVotesToVoteState(optionTexts, msgVotes, userId);
-      return { id: msg.id, dbId: msg.id, type: 'ai_vote', intro: msg.intro ?? '', options, myVote };
+      const optionTexts = (msg.options ?? []) as any[];
+      const { options: voteOptions, myVote } = dbVotesToVoteState(
+        optionTexts.map((o) => ({ text: typeof o === 'string' ? o : (o.text ?? o.name ?? '') })),
+        msgVotes,
+        userId,
+      );
+      // Merge rich data back in
+      const richMerged = voteOptions.map((vo, i) => ({
+        ...vo,
+        ...(typeof optionTexts[i] === 'object' ? optionTexts[i] : {}),
+      }));
+      return { id: msg.id, dbId: msg.id, type: 'ai_vote', intro: msg.intro ?? '', options: richMerged, myVote };
     }
     case 'user':
       return { id: msg.id, dbId: msg.id, type: 'user', text: msg.text ?? '', sentBy: msg.sent_by ?? undefined };
@@ -109,11 +172,35 @@ function dbMsgToUiMsg(msg: DbAiMessage, votes: DbAiVote[], userId: string | null
 
 // ── Attachment helpers ────────────────────────────────────────────────────────
 
-function formatFileSize(bytes?: number): string {
-  if (!bytes) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
+// Extract readable text from a basic (uncompressed) PDF
+function extractPdfText(base64: string): string {
+  try {
+    const raw = atob(base64);
+    const chunks: string[] = [];
+    // BT...ET text blocks
+    const btBlocks = raw.match(/BT[\s\S]*?ET/g) ?? [];
+    for (const block of btBlocks) {
+      const tj = block.match(/\(([^)]{1,200})\)\s*Tj/g) ?? [];
+      for (const t of tj) {
+        const m = t.match(/\(([^)]+)\)/);
+        if (m) chunks.push(m[1]);
+      }
+      const tjArr = block.match(/\[([^\]]{1,500})\]\s*TJ/g) ?? [];
+      for (const t of tjArr) {
+        const inner = t.match(/\(([^)]+)\)/g) ?? [];
+        for (const s of inner) chunks.push(s.slice(1, -1));
+      }
+    }
+    // Fallback: grab printable ASCII runs (catches some non-BT streams)
+    if (chunks.length === 0) {
+      const runs = raw.match(/[\x20-\x7E]{6,}/g) ?? [];
+      return runs.filter((r) => /[a-zA-Z]{3,}/.test(r)).join(' ').slice(0, 4000);
+    }
+    return chunks.join(' ').replace(/\\n/g, '\n').slice(0, 4000);
+  } catch {
+    return '';
+  }
 }
 
 function fileIcon(mimeType: string): string {
@@ -131,148 +218,54 @@ function fileColor(mimeType: string): string {
   return '#6B7280';
 }
 
-function getAttachmentAiResponse(attachments: Attachment[]): Omit<Extract<Message, { type: 'ai' }>, 'id' | 'type'> {
-  const names = attachments.map((a) => a.name.toLowerCase()).join(' ');
-
-  if (names.includes('hotel') || names.includes('booking') || names.includes('confirmation') || names.includes('reservation')) {
-    return {
-      text: "I've read your hotel confirmation. I can see a check-in on Apr 5 at Hotel Baur au Lac, Zürich — check-in from 3 PM, checkout Apr 7 by 11 AM. I've added this to your trip timeline and flagged the checkout time so you have buffer before your departure. Want me to plan the morning of Apr 7 around the 11 AM checkout?",
-    };
-  }
-  if (names.includes('flight') || names.includes('ticket') || names.includes('boarding') || names.includes('eticket') || names.includes('e-ticket')) {
-    return {
-      text: "Got your e-ticket. I can see a flight from CDG (Paris) to ZRH (Zürich) on Apr 2 departing 10:35 — arriving 12:10 local time. I've updated your Day 1 plan to start from Zürich Airport. Therme Zurzach is only 55 min from the airport, so that's still a great first stop. Want me to add airport transit time as a stop?",
-    };
-  }
-  if (names.includes('rail') || names.includes('train') || names.includes('eurail') || names.includes('sbb') || names.includes('sncf')) {
-    return {
-      text: "Train pass confirmed — looks like a Swiss Travel Pass valid Apr 2–7, covering unlimited travel on SBB trains, buses, and boats. Good news: Rhine Falls, Lucerne, and Interlaken are all on the network at no extra cost. I'll make sure all transport legs on your itinerary use covered routes.",
-    };
-  }
-  if (names.includes('itinerary') || names.includes('plan') || names.includes('schedule')) {
-    return {
-      text: `I've scanned your itinerary document. I can see ${attachments.length > 1 ? 'multiple files with' : 'a file with'} existing stops planned. I'll cross-reference these with your current Roamies plan — a few times look tight, particularly day 2. Want me to suggest a reordered sequence that reduces backtracking?`,
-    };
-  }
-
-  // Generic
-  return {
-    text: `I've received ${attachments.length === 1 ? 'your document' : `${attachments.length} files`} (${attachments.map((a) => a.name).join(', ')}). I'll use ${attachments.length === 1 ? 'it' : 'these'} as context while planning your trip. If there are booking references, dates, or addresses in there, I'll factor them into your itinerary. Anything specific you'd like me to extract?`,
-  };
-}
 
 // ── Simulated AI responses ────────────────────────────────────────────────────
 
 const QUICK_REPLIES = [
-  'Any pet-friendly cafes near Lucerne?',
-  'What time should we leave for Rhine Falls?',
-  'Best restaurant in Interlaken?',
-  'How long is the drive to Grindelwald?',
+  'Pet-friendly cafes near Lucerne',
+  'When to leave for Rhine Falls?',
+  'Best Interlaken restaurant',
+  'Drive time to Grindelwald',
 ];
 
-function getAiResponse(userText: string): Omit<Extract<Message, { type: 'ai' }>, 'id' | 'type'> {
-  const lower = userText.toLowerCase();
-
-  if (lower.includes('cafe') || lower.includes('coffee')) {
-    return {
-      text: "There's a great dog-friendly café near the Chapel Bridge — Café Rebstock (4.6★) has outdoor seating and a water bowl for pups. It's about a 3-minute walk from Luzern Hbf.",
-      sources: [{ label: 'Google' }, { label: 'Timeout' }],
-      place: {
-        name: 'Café Rebstock',
-        address: 'Rebstockweg 12, 6003 Luzern',
-        rating: 4.6,
-        hours: 'Open until 7 PM',
-        pet_friendly: true,
-      },
-    };
-  }
-
-  if (lower.includes('rhine') || lower.includes('waterfall') || lower.includes('leave') || lower.includes('time')) {
-    return {
-      text: "For Rhine Falls, I'd aim to leave by 10:00 to arrive before the crowds hit. The drive from your current stop is about 45 minutes. Weekday mornings are significantly quieter — boat tickets sell out by noon on weekends.",
-      sources: [{ label: 'Google' }, { label: 'Local news' }],
-    };
-  }
-
-  if (lower.includes('restaurant') || lower.includes('food') || lower.includes('eat') || lower.includes('dinner') || lower.includes('lunch') || lower.includes('interlaken')) {
-    return {
-      text: "Top pick in Interlaken is Restaurant Schuh (4.5★) — classic Swiss dishes, dog-friendly terrace, and a great view of the Jungfrau. For a more local feel, try Gasthof Hirschen a short walk from the main street. Book ahead — both fill up by 7 PM.",
-      sources: [{ label: 'Tabelog' }, { label: 'Google' }],
-      place: {
-        name: 'Restaurant Schuh',
-        address: 'Höheweg 56, 3800 Interlaken',
-        rating: 4.5,
-        hours: 'Open until 10 PM',
-        pet_friendly: true,
-      },
-    };
-  }
-
-  if (lower.includes('drive') || lower.includes('long') || lower.includes('grindelwald') || lower.includes('how far')) {
-    return {
-      text: "Interlaken to Grindelwald is about 25 minutes by car (18 km). If you're taking the scenic route via Wilderswil, add 10 minutes — worth it for the mountain views. Parking at Grindelwald is CHF 12/day at the main lot near the cable car.",
-      sources: [{ label: 'Google Maps' }],
-    };
-  }
-
-  if (lower.includes('pet') || lower.includes('dog') || lower.includes('friendly')) {
-    return {
-      text: "Good news — your whole route is very dog-friendly. Rhine Falls has a circular path that's leash-free in most sections. Therme Zurzach allows dogs in the outdoor pools area. Lucerne's Chapel Bridge walk is fully dog-accessible. Just avoid the Jungfraujoch if you're heading that far — dogs aren't permitted on the cogwheel train.",
-      sources: [{ label: 'Google' }, { label: 'Local news' }],
-    };
-  }
-
-  if (lower.includes('weather') || lower.includes('rain') || lower.includes('cold') || lower.includes('temperature')) {
-    return {
-      text: "This week looks good — mostly sunny in the lowlands (Lucerne, Zurich area) with highs around 14°C. Grindelwald and higher Alpine areas will be cooler, around 6°C, with potential afternoon showers. Bring a light waterproof layer. Rhine Falls is fine in light rain — the mist from the falls already soaks you anyway.",
-      sources: [{ label: 'SRF Meteo' }],
-    };
-  }
-
-  // Default
-  return {
-    text: "I've looked at your current itinerary and everything looks well-paced. Rhine Falls in the morning is smart timing — Therme Zurzach after is a perfect contrast. Lucerne in the evening gives you the golden-hour light on the Chapel Bridge. Want me to check anything specific along the route?",
-    sources: [{ label: 'Google' }],
-  };
-}
-
-// ── Seed messages ──────────────────────────────────────────────────────────────
-
-const INITIAL_MESSAGES: Message[] = [
-  {
-    id: 'm1',
-    type: 'proactive',
-    text: 'I removed Rosenlaui Valley from your plan — it\'s closed until May 14th. I\'ve added buffer time to your Grindelwald stop instead.',
-  },
-  {
-    id: 'm2',
-    type: 'user',
-    text: 'Is there anywhere we can stop for a soak with the dog?',
-  },
-  {
-    id: 'm3',
-    type: 'ai',
-    text: 'I found a great hot spring for tomorrow en route to Lucerne. Therme Zurzach (4.5★) is pet-friendly and confirmed open.',
-    sources: [{ label: 'Google' }],
-    place: {
-      name: 'Therme Zurzach',
-      address: 'Quellenstrasse 30, 5330 Bad Zurzach',
-      rating: 4.5,
-      hours: 'Open until 10 PM',
-      pet_friendly: true,
-    },
-  },
-];
 
 // ── Component ──────────────────────────────────────────────────────────────────
 
 export default function AiScreen() {
   const router = useRouter();
-  const { activeTrip, todayStops, members, profile, userId } = useApp();
+  const { prefill, autoSend } = useLocalSearchParams<{ prefill?: string; autoSend?: string }>();
+  const { activeTrip, todayStops, members, profile, userId, addStop } = useApp();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [showReplies, setShowReplies] = useState(true);
+  const [currentCoords, setCurrentCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [pendingFile, setPendingFile] = useState<{ name: string; content: string } | null>(null);
   const scrollRef = useRef<ScrollView>(null);
+  const prefillApplied = useRef(false);
+
+  // Apply prefill from route params (e.g. from mini panel in Trip tab)
+  useEffect(() => {
+    if (!prefill || prefillApplied.current) return;
+    prefillApplied.current = true;
+    if (autoSend === 'true') {
+      // sendMessage depends on activeTrip/userId which may not be ready yet — short delay
+      setTimeout(() => sendMessage(prefill as string), 300);
+    } else {
+      setInputText(prefill as string);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill]);
+
+  // Try to get current location (best-effort, no hard requirement)
+  useEffect(() => {
+    Location.getForegroundPermissionsAsync().then(({ status }) => {
+      if (status !== 'granted') return;
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
+        .then((loc) => setCurrentCoords({ latitude: loc.coords.latitude, longitude: loc.coords.longitude }))
+        .catch(() => {});
+    });
+  }, []);
   // Track IDs we inserted ourselves so real-time doesn't double-add them
   const ownInsertIds = useRef<Set<string>>(new Set());
 
@@ -312,7 +305,7 @@ export default function AiScreen() {
       const votes = (data ?? []) as DbAiVote[];
       setMessages((prev) =>
         prev.map((m) => {
-          if (m.dbId !== messageId || m.type !== 'ai_vote') return m;
+          if (m.type === 'typing' || m.dbId !== messageId || m.type !== 'ai_vote') return m;
           const { options, myVote } = dbVotesToVoteState(
             m.options.map((o) => ({ text: o.text })),
             votes,
@@ -358,19 +351,28 @@ export default function AiScreen() {
       ? todayStops.map((s) => `- ${s.time}: ${s.place_name} (${s.category})`).join('\n')
       : 'No stops planned yet.';
     const memberNames = members.map((m) => m.name).join(', ') || 'Just you';
-    return `You are Roamie, a friendly travel co-planner for a group trip.
+    const locationLine = currentCoords
+      ? `Current GPS: ${currentCoords.latitude.toFixed(4)}, ${currentCoords.longitude.toFixed(4)} (use this to estimate travel times)`
+      : 'Current location: not available';
+
+    return `You are Roamie, a warm and knowledgeable travel companion for a group trip. You know the trip details below and chat naturally with the travellers.
+
 Trip: ${activeTrip?.name ?? 'Unknown trip'}
 Dates: ${activeTrip?.dates_label ?? 'Unknown dates'}
 Travellers: ${memberNames}
+${locationLine}
 Today's itinerary:
 ${stopList}
 
-IMPORTANT FORMATTING RULES:
-- When the question involves a decision, recommendation, or choice (e.g. "where should we go", "what should we do", "best option"), always present exactly 2–3 options as a numbered list.
-- Format: one intro sentence, then each option on its own line starting with "1.", "2.", "3."
-- Keep each option to one concise sentence with a practical detail.
-- For simple factual questions (distances, hours, weather), answer directly without a list.
-- Never use bullet points (–, •), only numbered lists for options.`;
+RESPONSE RULES:
+
+1. For greetings, casual chat, or simple factual questions ("hi", "what time is it", "how far is X", "is it open") — reply naturally in plain conversational text, 1–3 sentences. Be warm and friendly.
+
+2. ONLY use vote card JSON when the user explicitly asks to "suggest", "recommend", "find options", "where should we", "what are some good", or wants to compare places. In that case respond with ONLY valid JSON (no markdown, no code fences):
+{"type":"vote","intro":"One sentence intro.","options":[{"name":"Place Name","description":"2-sentence description.","rating":4.5,"address":"Street address","category":"café","coords":{"lat":0.0000,"lng":0.0000},"travelTime":"~10 min walk"},{"name":"...","description":"...","rating":4.3,"address":"...","category":"restaurant","coords":{"lat":0.0000,"lng":0.0000},"travelTime":"~15 min drive"},{"name":"...","description":"...","rating":4.7,"address":"...","category":"café","coords":{"lat":0.0000,"lng":0.0000},"travelTime":"~5 min walk"}]}
+Vote cards must have EXACTLY 3 options with real place names and realistic coords.
+
+3. Never force vote cards on conversational messages. Match the energy of what was asked.`;
   };
 
   const sendMessage = async (text?: string) => {
@@ -407,17 +409,99 @@ IMPORTANT FORMATTING RULES:
           ? `${(m as any).intro}\n${(m as any).options.map((o: any, i: number) => `${i + 1}. ${o.text}`).join('\n')}`
           : (m as any).text ?? '',
       }));
-    history.push({ role: 'user', content });
+    // If there's a pending file, attach its content to this message and clear it
+    const fileCtx = pendingFile;
+    setPendingFile(null);
+    const userContentForAi = fileCtx
+      ? `${content}\n\n[Attached file: "${fileCtx.name}"]\n${fileCtx.content.length > 50 ? fileCtx.content : '(Could not extract text from this file)'}`
+      : content;
+    history.push({ role: 'user', content: userContentForAi });
+
+    // Use a document-aware system prompt when a file is attached
+    const systemPrompt = fileCtx
+      ? `${buildSystemPrompt()}
+
+The user has attached a document. Follow their instruction exactly.
+- If they ask to extract/add to plan: return ONLY a JSON array — no other text:
+  [{"place_name":"Name","category":"hotel|restaurant|sightseeing|transport","date":"YYYY-MM-DD","time":"HH:MM","notes":"optional"}]
+- If they ask a question about the document: answer in plain text.
+- NEVER return vote JSON for document tasks.`
+      : buildSystemPrompt();
 
     try {
-      const replyText = await askClaude(buildSystemPrompt(), history);
-      const parsed = parseOptions(replyText);
+      const replyText = await askClaude(systemPrompt, history);
+
+      // If file was attached, try to parse as stop list first
+      if (fileCtx) {
+        let stops: { place_name: string; category: string; date?: string; time?: string; notes?: string }[] = [];
+        try {
+          const jsonMatch = replyText.replace(/```[a-z]*\n?/g, '').replace(/```/g, '').match(/\[[\s\S]*\]/);
+          if (jsonMatch) stops = JSON.parse(jsonMatch[0]);
+        } catch {}
+
+        if (stops.length > 0) {
+          const today = new Date().toISOString().split('T')[0];
+          for (const stop of stops) {
+            await addStop({
+              place_name: stop.place_name,
+              category: stop.category ?? 'sightseeing',
+              time: stop.time ?? '12:00',
+              description: stop.notes ?? '',
+              hours_today: 'unknown',
+              duration_minutes: 60,
+              pet_friendly: false,
+              origin: 'ai_suggested',
+              sources: [],
+            }, stop.date ?? today);
+          }
+          const aiText = `Done! I've added ${stops.length} stop${stops.length !== 1 ? 's' : ''} from "${fileCtx.name}" to your trip plan:\n\n${stops.map((s) => `• ${s.place_name}${s.date ? ` — ${s.date}` : ''}`).join('\n')}`;
+          const { data: dbAiMsg } = await supabase
+            .from('trip_ai_messages')
+            .insert({ trip_id: activeTrip.id, type: 'ai', text: aiText })
+            .select().single();
+          if (dbAiMsg) ownInsertIds.current.add(dbAiMsg.id);
+          setIsTyping(false);
+          setMessages((prev) => [...prev, { id: dbAiMsg?.id ?? `ai_${Date.now()}`, dbId: dbAiMsg?.id, type: 'ai', text: aiText }]);
+          scrollToEnd();
+          return;
+        }
+      }
+
+      // Try JSON vote format first, fall back to numbered list, then plain text
+      let voteData: { intro: string; options: string[]; richOptions?: (any | null)[] } | null = null;
+      try {
+        // Strip markdown code fences Llama sometimes adds
+        const cleaned = replyText.replace(/```[a-z]*\n?/g, '').replace(/```/g, '').trim();
+        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const json = JSON.parse(jsonMatch[0]);
+          if (json.type === 'vote' && Array.isArray(json.options) && json.options.length >= 2) {
+            // Handle both rich object format and plain string format
+            const options = json.options.slice(0, 3).map((o: any) =>
+              typeof o === 'string' ? o : o.name ? `${o.name} — ${o.description ?? ''}` : String(o)
+            );
+            voteData = {
+              intro: json.intro ?? '',
+              options,
+              richOptions: json.options.slice(0, 3).map((o: any) =>
+                typeof o === 'object' && o.name ? o : null
+              ),
+            };
+          }
+        }
+      } catch {}
+
+      if (!voteData) voteData = parseOptions(replyText);
 
       let dbAiMsg: any;
-      if (parsed) {
+      if (voteData) {
+        const dbOptions = voteData.richOptions?.every(Boolean)
+          ? voteData.richOptions.map((o) => ({ ...o, text: `${o.name} — ${o.description ?? ''}` }))
+          : voteData.options.map((t) => ({ text: t }));
+
         const { data } = await supabase
           .from('trip_ai_messages')
-          .insert({ trip_id: activeTrip.id, type: 'ai_vote', intro: parsed.intro, options: parsed.options.map((t) => ({ text: t })) })
+          .insert({ trip_id: activeTrip.id, type: 'ai_vote', intro: voteData.intro, options: dbOptions })
           .select().single();
         dbAiMsg = data;
       } else {
@@ -431,13 +515,16 @@ IMPORTANT FORMATTING RULES:
       if (dbAiMsg) ownInsertIds.current.add(dbAiMsg.id);
 
       setIsTyping(false);
-      if (parsed) {
+      if (voteData) {
         setMessages((prev) => [...prev, {
           id: dbAiMsg?.id ?? `ai_${Date.now()}`,
           dbId: dbAiMsg?.id,
           type: 'ai_vote',
-          intro: parsed.intro,
-          options: parsed.options.map((t) => ({ text: t, votes: 0 })),
+          intro: voteData!.intro,
+          options: (voteData!.richOptions?.every(Boolean)
+            ? voteData!.richOptions.map((o) => ({ ...o, text: `${o.name} — ${o.description ?? ''}`, votes: 0 }))
+            : voteData!.options.map((t) => ({ text: t, votes: 0 }))
+          ),
           myVote: null,
         }]);
       } else {
@@ -448,13 +535,36 @@ IMPORTANT FORMATTING RULES:
           text: replyText,
         }]);
       }
-    } catch {
-      const response = getAiResponse(content);
+    } catch (err) {
+      console.error('Roamie API error:', err);
       setIsTyping(false);
-      setMessages((prev) => [...prev, { id: `ai_${Date.now()}`, type: 'ai', ...response }]);
+      setMessages((prev) => [...prev, {
+        id: `ai_${Date.now()}`,
+        type: 'ai',
+        text: `Sorry, I couldn't get a response right now. (${err instanceof Error ? err.message : String(err)})`,
+      }]);
     }
     scrollToEnd();
   };
+
+  const addToPlan = useCallback((optionText: string) => {
+    // Extract place name — everything before " — " or " - "
+    const placeName = optionText.split(/\s[—\-]\s/)[0].trim();
+    const today = new Date().toISOString().split('T')[0];
+    Alert.alert(
+      'Add to trip plan?',
+      `"${placeName}" will be added to today's stops.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Add',
+          onPress: () => {
+            addStop({ place_name: placeName, category: 'sightseeing', time: '12:00', description: '', hours_today: 'unknown', duration_minutes: 60, pet_friendly: false, origin: 'ai_suggested', sources: [] }, today);
+          },
+        },
+      ]
+    );
+  }, [addStop]);
 
   const castVote = useCallback(async (msg: Extract<Message, { type: 'ai_vote' }>, optionIdx: number) => {
     const prevVote = msg.myVote;
@@ -487,35 +597,41 @@ IMPORTANT FORMATTING RULES:
   }, [userId]);
 
   const pickFiles = async () => {
+    if (!activeTrip?.id || !userId) return;
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        multiple: true,
-        copyToCacheDirectory: false,
+        multiple: false,
+        copyToCacheDirectory: true,
+        type: ['application/pdf', 'text/plain', 'text/*'],
       });
       if (result.canceled || !result.assets?.length) return;
 
-      const attachments: Attachment[] = result.assets.map((asset) => ({
-        name: asset.name,
-        size: formatFileSize(asset.size),
-        mimeType: asset.mimeType ?? 'application/octet-stream',
-      }));
+      const asset = result.assets[0];
 
-      const userMsg: Message = {
-        id: `m${Date.now()}`,
-        type: 'user',
-        text: attachments.length === 1 ? 'Here is a file for context.' : `Here are ${attachments.length} files for context.`,
-        attachments,
-      };
-      setMessages((prev) => [...prev, userMsg]);
-      setIsTyping(true);
+      // Read file content immediately
+      let fileText = '';
+      try {
+        if (asset.mimeType?.includes('pdf')) {
+          const b64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 });
+          fileText = extractPdfText(b64);
+        } else {
+          fileText = await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.UTF8 });
+        }
+      } catch { fileText = ''; }
+
+      // Store content for next user message, show file chip + prompt in chat
+      setPendingFile({ name: asset.name, content: fileText });
+
+      const promptText = fileText.length > 50
+        ? `📎 "${asset.name}" ready. What would you like me to do with it?`
+        : `📎 "${asset.name}" attached (couldn't extract text — it may be a scanned PDF). What would you like me to do?`;
+
+      setMessages((prev) => [...prev, {
+        id: `file_${Date.now()}`,
+        type: 'ai',
+        text: promptText,
+      }]);
       scrollToEnd();
-
-      setTimeout(() => {
-        const response = getAttachmentAiResponse(attachments);
-        setIsTyping(false);
-        setMessages((prev) => [...prev, { id: `m${Date.now() + 1}`, type: 'ai', ...response }]);
-        scrollToEnd();
-      }, 2000);
     } catch {
       // user cancelled or permission denied — no-op
     }
@@ -563,10 +679,10 @@ IMPORTANT FORMATTING RULES:
           showsVerticalScrollIndicator={false}
           onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
         >
-          {messages.map((msg) => {
+          {messages.filter((msg, i, arr) => arr.findIndex((m) => m.id === msg.id) === i).map((msg) => {
             if (msg.type === 'proactive') return <ProactiveMessage key={msg.id} text={msg.text} />;
             if (msg.type === 'ai') return <AiMessage key={msg.id} msg={msg} />;
-            if (msg.type === 'ai_vote') return <VoteCard key={msg.id} msg={msg} onVote={(i) => castVote(msg, i)} />;
+            if (msg.type === 'ai_vote') return <VoteCard key={msg.id} msg={msg} onVote={(i) => castVote(msg, i)} onAddToPlan={addToPlan} currentCoords={currentCoords} />;
             if (msg.type === 'user') return <UserMessage key={msg.id} text={msg.text} sentBy={msg.sentBy} attachments={msg.attachments} members={members} userId={userId} />;
             return null;
           })}
@@ -576,25 +692,35 @@ IMPORTANT FORMATTING RULES:
           <View style={{ height: 8 }} />
         </ScrollView>
 
-        {/* Quick replies */}
+        {/* Quick replies — collapsible */}
         {!isTyping && (
           <View style={styles.quickRepliesWrapper}>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.quickReplies}
+            <TouchableOpacity
+              style={styles.quickRepliesToggle}
+              onPress={() => setShowReplies((v) => !v)}
+              activeOpacity={0.7}
             >
-              {QUICK_REPLIES.map((reply) => (
-                <TouchableOpacity
-                  key={reply}
-                  style={styles.quickReplyChip}
-                  onPress={() => sendMessage(reply)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.quickReplyText}>{reply}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
+              <Text style={styles.quickRepliesToggleText}>Suggestions</Text>
+              <Ionicons name={showReplies ? 'chevron-down' : 'chevron-up'} size={14} color="#9CA3AF" />
+            </TouchableOpacity>
+            {showReplies && (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.quickReplies}
+              >
+                {QUICK_REPLIES.map((reply) => (
+                  <TouchableOpacity
+                    key={reply}
+                    style={styles.quickReplyChip}
+                    onPress={() => sendMessage(reply)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.quickReplyText}>{reply}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
           </View>
         )}
 
@@ -652,11 +778,26 @@ function ProactiveMessage({ text }: { text: string }) {
 function VoteCard({
   msg,
   onVote,
+  onAddToPlan,
+  currentCoords,
 }: {
   msg: Extract<Message, { type: 'ai_vote' }>;
-  onVote: (idx: number) => void;  // caller passes the full msg object
+  onVote: (idx: number) => void;
+  onAddToPlan: (optionText: string) => void;
+  currentCoords: { latitude: number; longitude: number } | null;
 }) {
+  const { width } = useWindowDimensions();
+  const cardWidth = width - 32 - 32; // screen - message padding - aiCard padding
+  const [activeIdx, setActiveIdx] = useState(0);
+  const carouselRef = useRef<ScrollView>(null);
+
   const totalVotes = msg.options.reduce((sum, o) => sum + o.votes, 0);
+  const leadingIdx = totalVotes > 0
+    ? msg.options.reduce((best, o, i, arr) => o.votes > arr[best].votes ? i : best, 0)
+    : null;
+
+  const votedOpt = msg.myVote !== null ? msg.options[msg.myVote] : null;
+  const addTarget = votedOpt ?? (leadingIdx !== null ? msg.options[leadingIdx] : null);
 
   return (
     <View style={styles.aiWrapper}>
@@ -671,49 +812,150 @@ function VoteCard({
         </View>
       </View>
 
-      <View style={styles.aiCard}>
-        {!!msg.intro && <Text style={styles.aiText}>{msg.intro}</Text>}
+      <View style={[styles.aiCard, { padding: 0, overflow: 'hidden' }]}>
+        {!!msg.intro && (
+          <Text style={[styles.aiText, { padding: 14, paddingBottom: 10 }]}>{msg.intro}</Text>
+        )}
 
-        <View style={styles.voteOptions}>
+        {/* Carousel */}
+        <ScrollView
+          ref={carouselRef}
+          horizontal
+          pagingEnabled
+          showsHorizontalScrollIndicator={false}
+          onMomentumScrollEnd={(e) => {
+            const idx = Math.round(e.nativeEvent.contentOffset.x / cardWidth);
+            setActiveIdx(idx);
+          }}
+          style={{ width: cardWidth }}
+        >
           {msg.options.map((opt, i) => {
             const isSelected = msg.myVote === i;
-            const pct = totalVotes > 0 ? opt.votes / totalVotes : 0;
-            return (
-              <TouchableOpacity
-                key={i}
-                style={[styles.voteOption, isSelected && styles.voteOptionSelected]}
-                onPress={() => onVote(i)}
-                activeOpacity={0.8}
-              >
-                {/* Progress bar fill */}
-                {totalVotes > 0 && (
-                  <View style={[styles.voteBar, { width: `${Math.round(pct * 100)}%` as any }]} />
-                )}
+            const isLeading = leadingIdx === i && totalVotes > 0;
+            const catStyle = categoryStyle(opt.category);
+            const pct = totalVotes > 0 ? Math.round(opt.votes / totalVotes * 100) : 0;
 
-                <View style={styles.voteOptionInner}>
-                  <View style={[styles.voteNum, isSelected && styles.voteNumSelected]}>
-                    {isSelected
-                      ? <Ionicons name="checkmark" size={12} color="#FFFFFF" />
-                      : <Text style={styles.voteNumText}>{i + 1}</Text>
-                    }
-                  </View>
-                  <Text style={[styles.voteOptionText, isSelected && styles.voteOptionTextSelected]} numberOfLines={3}>
-                    {opt.text}
-                  </Text>
-                  {totalVotes > 0 && (
-                    <Text style={styles.voteCount}>{opt.votes}</Text>
+            let distanceText = opt.travelTime ?? null;
+            if (!distanceText && currentCoords && opt.coords?.lat && opt.coords?.lng) {
+              const km = haversineKm(currentCoords.latitude, currentCoords.longitude, opt.coords.lat, opt.coords.lng);
+              distanceText = formatDistance(km);
+            }
+
+            return (
+              <View key={i} style={[styles.carouselCard, { width: cardWidth }]}>
+                {/* Colour header — photo goes here later */}
+                <View style={[styles.carouselHeader, { backgroundColor: catStyle.color }]}>
+                  <Ionicons name={catStyle.icon as any} size={32} color="rgba(255,255,255,0.9)" />
+                  {isLeading && (
+                    <View style={styles.carouselLeadBadge}>
+                      <Text style={styles.carouselLeadText}>LEADING</Text>
+                    </View>
+                  )}
+                  {isSelected && (
+                    <View style={styles.carouselVotedBadge}>
+                      <Ionicons name="checkmark" size={12} color="#FFFFFF" />
+                      <Text style={styles.carouselVotedText}>VOTED</Text>
+                    </View>
                   )}
                 </View>
-              </TouchableOpacity>
+
+                {/* Details */}
+                <View style={styles.carouselBody}>
+                  <Text style={styles.carouselName} numberOfLines={1}>
+                    {opt.name ?? opt.text.split(' — ')[0]}
+                  </Text>
+
+                  <View style={styles.richMeta}>
+                    {opt.rating && (
+                      <>
+                        <Ionicons name="star" size={12} color="#F59E0B" />
+                        <Text style={styles.richMetaText}>{opt.rating}</Text>
+                        <Text style={styles.richMetaDot}>·</Text>
+                      </>
+                    )}
+                    {distanceText && (
+                      <>
+                        <Ionicons name="navigate-outline" size={12} color="#6B7280" />
+                        <Text style={styles.richMetaText}>{distanceText}</Text>
+                      </>
+                    )}
+                    {totalVotes > 0 && (
+                      <>
+                        <Text style={styles.richMetaDot}>·</Text>
+                        <Text style={[styles.richMetaText, isSelected && { color: '#6B3FA0', fontWeight: '700' }]}>
+                          {opt.votes} vote{opt.votes !== 1 ? 's' : ''}
+                        </Text>
+                      </>
+                    )}
+                  </View>
+
+                  {opt.description && (
+                    <Text style={styles.carouselDescription}>{opt.description}</Text>
+                  )}
+
+                  {opt.address && (
+                    <Text style={styles.richAddress} numberOfLines={1}>{opt.address}</Text>
+                  )}
+
+                  {/* Vote progress bar */}
+                  {totalVotes > 0 && (
+                    <View style={styles.carouselProgressTrack}>
+                      <View style={[styles.carouselProgressFill, {
+                        width: `${pct}%` as any,
+                        backgroundColor: isSelected ? '#6B3FA0' : '#C4B5FD',
+                      }]} />
+                    </View>
+                  )}
+
+                  {/* Vote button */}
+                  <TouchableOpacity
+                    style={[styles.carouselVoteBtn, isSelected && styles.carouselVoteBtnSelected]}
+                    onPress={() => onVote(i)}
+                    activeOpacity={0.8}
+                  >
+                    {isSelected
+                      ? <Ionicons name="checkmark-circle" size={16} color="#FFFFFF" />
+                      : <Ionicons name="thumbs-up-outline" size={16} color="#6B3FA0" />
+                    }
+                    <Text style={[styles.carouselVoteBtnText, isSelected && { color: '#FFFFFF' }]}>
+                      {isSelected ? 'Voted' : 'Vote for this'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
             );
           })}
-        </View>
+        </ScrollView>
 
-        <Text style={styles.voteHint}>
-          {msg.myVote !== null
-            ? `You voted · ${totalVotes} vote${totalVotes !== 1 ? 's' : ''} total`
-            : 'Tap an option to vote'}
-        </Text>
+        {/* Dots + Add to plan */}
+        <View style={styles.carouselFooter}>
+          <View style={styles.carouselDots}>
+            {msg.options.map((_, i) => (
+              <TouchableOpacity
+                key={i}
+                onPress={() => {
+                  carouselRef.current?.scrollTo({ x: i * cardWidth, animated: true });
+                  setActiveIdx(i);
+                }}
+              >
+                <View style={[styles.carouselDot, activeIdx === i && styles.carouselDotActive]} />
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {addTarget && (
+            <TouchableOpacity
+              style={styles.richAddBtn}
+              onPress={() => onAddToPlan(addTarget.name ?? addTarget.text)}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="add-circle-outline" size={13} color="#6B3FA0" />
+              <Text style={styles.richAddText}>
+                {msg.myVote !== null ? 'Add voted place to plan' : 'Add leading to plan'}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
     </View>
   );
@@ -950,7 +1192,21 @@ const styles = StyleSheet.create({
 
   // Quick replies
   quickRepliesWrapper: {
-    paddingVertical: 10,
+    paddingTop: 6,
+    paddingBottom: 4,
+  },
+  quickRepliesToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 16,
+    paddingBottom: 6,
+  },
+  quickRepliesToggleText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#9CA3AF',
+    letterSpacing: 0.4,
   },
   quickReplies: {
     paddingHorizontal: 16,
@@ -1063,42 +1319,218 @@ const styles = StyleSheet.create({
   },
   voteBadgeText: { fontSize: 10, fontWeight: '700', color: '#6B3FA0', letterSpacing: 0.5 },
 
-  voteOptions: { gap: 8 },
-  voteOption: {
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: '#E5E7EB',
+  voteHint: { fontSize: 12, color: '#9CA3AF', textAlign: 'center', marginTop: 2 },
+
+  // Rich vote option cards
+  richOption: {
+    backgroundColor: '#FFFFFF',
+    flexDirection: 'row',
+    position: 'relative',
     overflow: 'hidden',
-    backgroundColor: '#F9FAFB',
+    minHeight: 90,
   },
-  voteOptionSelected: {
-    borderColor: '#6B3FA0',
-    backgroundColor: '#F5F0FC',
+  richOptionSelected: {
+    backgroundColor: '#FAF5FF',
   },
-  voteBar: {
+  richVoteBar: {
     position: 'absolute',
-    top: 0, left: 0, bottom: 0,
-    backgroundColor: '#EDE9F8',
-    borderRadius: 10,
+    top: 0,
+    left: 0,
+    bottom: 0,
+    opacity: 0.15,
   },
-  voteOptionInner: {
+  richCategoryStrip: {
+    width: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  richContent: {
+    flex: 1,
+    padding: 12,
+    gap: 4,
+  },
+  richNameRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+    gap: 6,
   },
-  voteNum: {
-    width: 22, height: 22, borderRadius: 11,
-    backgroundColor: '#E5E7EB',
-    alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+  richName: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#111827',
   },
-  voteNumSelected: { backgroundColor: '#6B3FA0' },
-  voteNumText: { fontSize: 11, fontWeight: '700', color: '#6B7280' },
-  voteOptionText: { flex: 1, fontSize: 14, color: '#374151', lineHeight: 19, fontWeight: '500' },
-  voteOptionTextSelected: { color: '#4B1F8A', fontWeight: '600' },
-  voteCount: { fontSize: 13, fontWeight: '700', color: '#6B3FA0', minWidth: 16, textAlign: 'right' },
-  voteHint: { fontSize: 12, color: '#9CA3AF', textAlign: 'center', marginTop: 2 },
+  richNameSelected: {
+    color: '#6B3FA0',
+  },
+  richVotedBadge: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#6B3FA0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  richLeadBadge: {
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  richLeadText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#92400E',
+    letterSpacing: 0.5,
+  },
+  richMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  richMetaText: {
+    fontSize: 12,
+    color: '#6B7280',
+    fontWeight: '500',
+  },
+  richMetaDot: {
+    fontSize: 12,
+    color: '#D1D5DB',
+  },
+  richDescription: {
+    fontSize: 13,
+    color: '#374151',
+    lineHeight: 18,
+  },
+  richAddress: {
+    fontSize: 11,
+    color: '#9CA3AF',
+  },
+  richAddBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+  },
+  richAddText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6B3FA0',
+  },
+
+  // Carousel vote card
+  carouselCard: {
+    backgroundColor: '#FFFFFF',
+  },
+  carouselHeader: {
+    height: 110,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  carouselLeadBadge: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  carouselLeadText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#92400E',
+    letterSpacing: 0.5,
+  },
+  carouselVotedBadge: {
+    position: 'absolute',
+    top: 10,
+    left: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#6B3FA0',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  carouselVotedText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    letterSpacing: 0.5,
+  },
+  carouselBody: {
+    padding: 14,
+    gap: 6,
+  },
+  carouselName: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#111827',
+  },
+  carouselDescription: {
+    fontSize: 13,
+    color: '#374151',
+    lineHeight: 19,
+  },
+  carouselProgressTrack: {
+    height: 3,
+    backgroundColor: '#F3F4F6',
+    borderRadius: 2,
+    overflow: 'hidden',
+    marginTop: 2,
+  },
+  carouselProgressFill: {
+    height: 3,
+    borderRadius: 2,
+  },
+  carouselVoteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 4,
+    paddingVertical: 10,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#6B3FA0',
+    backgroundColor: '#FFFFFF',
+  },
+  carouselVoteBtnSelected: {
+    backgroundColor: '#6B3FA0',
+    borderColor: '#6B3FA0',
+  },
+  carouselVoteBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#6B3FA0',
+  },
+  carouselFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+  },
+  carouselDots: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  carouselDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#D1D5DB',
+  },
+  carouselDotActive: {
+    width: 18,
+    backgroundColor: '#6B3FA0',
+  },
 
   // Typing indicator
   typingCard: {

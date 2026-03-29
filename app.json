@@ -26,6 +26,11 @@
     ],
     "scheme": "waypoint",
     "newArchEnabled": true,
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": null
+    },
     "experiments": {
       "typedRoutes": true
     }

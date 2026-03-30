@@ -426,7 +426,7 @@ export default function GroupScreen() {
   const displayTripName = activeTrip?.name ?? 'Swiss Summer Tour';
   const displayTripDates = activeTrip?.dates_label ?? 'Apr 2 – Apr 7, 2026';
 
-  const TRIP_LINK = 'roamies.app/swiss-tour-2026';
+  const TRIP_LINK = 'roamies-seven.vercel.app';
 
   const handleSendInvite = async () => {
     const email = inviteEmail.trim().toLowerCase();

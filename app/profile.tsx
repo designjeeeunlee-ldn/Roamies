@@ -20,7 +20,7 @@ const STATUS_OPTIONS: { id: TravelStatus; label: string; icon: string; color: st
 
 export default function ProfileScreen() {
   const router = useRouter();
-  const { profile, updateProfile, allTrips, setActiveTripId, deleteTrip } = useApp();
+  const { profile, updateProfile, allTrips, setActiveTripId, deleteTrip, tripPhotos } = useApp();
 
   // Classify trips as upcoming/ongoing vs past
   const todayMidnight = new Date(); todayMidnight.setHours(0, 0, 0, 0);
@@ -38,6 +38,15 @@ export default function ProfileScreen() {
     const end = new Date(r.end); end.setHours(23, 59, 59, 999);
     return end < todayMidnight;
   });
+
+  const thisYear = new Date().getFullYear();
+  const tripsThisYear = allTrips.filter((t) => {
+    if (!t.dates_label) return false;
+    const r = parseDatesLabel(t.dates_label);
+    return r ? new Date(r.start).getFullYear() === thisYear : false;
+  }).length;
+  const totalPhotos = tripPhotos.length;
+  const totalTrips = allTrips.length;
 
   const handleDeleteTrip = (tripId: string, tripName: string) => {
     const doDelete = async () => {
@@ -131,22 +140,22 @@ export default function ProfileScreen() {
         {/* Stats bento */}
         <View style={styles.statsGrid}>
           <View style={[styles.statCard, styles.statCardPurple]}>
-            <Text style={styles.statNumber}>14</Text>
-            <Text style={styles.statLabel}>Countries</Text>
-            <Ionicons name="globe-outline" size={20} color="rgba(255,255,255,0.6)" style={styles.statIcon} />
+            <Text style={styles.statNumber}>{totalTrips}</Text>
+            <Text style={styles.statLabel}>Total Trips</Text>
+            <Ionicons name="map-outline" size={20} color="rgba(255,255,255,0.6)" style={styles.statIcon} />
           </View>
           <View style={styles.statCard}>
-            <Text style={[styles.statNumber, styles.statNumberDark]}>38</Text>
-            <Text style={[styles.statLabel, styles.statLabelDark]}>Cities</Text>
-            <Ionicons name="business-outline" size={20} color="#D1D5DB" style={styles.statIcon} />
+            <Text style={[styles.statNumber, styles.statNumberDark]}>{pastTrips.length}</Text>
+            <Text style={[styles.statLabel, styles.statLabelDark]}>Completed</Text>
+            <Ionicons name="checkmark-circle-outline" size={20} color="#D1D5DB" style={styles.statIcon} />
           </View>
           <View style={styles.statCard}>
-            <Text style={[styles.statNumber, styles.statNumberDark]}>194</Text>
-            <Text style={[styles.statLabel, styles.statLabelDark]}>Photos Shared</Text>
+            <Text style={[styles.statNumber, styles.statNumberDark]}>{totalPhotos}</Text>
+            <Text style={[styles.statLabel, styles.statLabelDark]}>Photos</Text>
             <Ionicons name="images-outline" size={20} color="#D1D5DB" style={styles.statIcon} />
           </View>
           <View style={[styles.statCard, styles.statCardGold]}>
-            <Text style={styles.statNumber}>3</Text>
+            <Text style={styles.statNumber}>{tripsThisYear}</Text>
             <Text style={styles.statLabel}>Trips This Year</Text>
             <Ionicons name="airplane-outline" size={20} color="rgba(255,255,255,0.6)" style={styles.statIcon} />
           </View>

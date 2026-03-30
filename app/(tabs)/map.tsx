@@ -1,9 +1,15 @@
 import { useState, useRef } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import MapView, { Marker, Polyline, PROVIDER_DEFAULT } from 'react-native-maps';
+
+const IS_WEB = Platform.OS === 'web';
+let MapView: any = null, Marker: any = null, Polyline: any = null, PROVIDER_DEFAULT: any = null;
+if (!IS_WEB) {
+  const Maps = require('react-native-maps');
+  MapView = Maps.default; Marker = Maps.Marker; Polyline = Maps.Polyline; PROVIDER_DEFAULT = Maps.PROVIDER_DEFAULT;
+}
 
 // ── Data ───────────────────────────────────────────────────────────────────────
 
@@ -81,6 +87,18 @@ export default function MapScreen() {
   };
 
   const currentStop = STOPS.find((s) => s.status === 'current');
+
+  if (IS_WEB) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+          <Ionicons name="map-outline" size={48} color="#C4B5FD" />
+          <Text style={{ fontSize: 16, fontWeight: '700', color: '#374151' }}>Map view</Text>
+          <Text style={{ fontSize: 13, color: '#9CA3AF' }}>Available in the mobile app</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <View style={styles.container}>

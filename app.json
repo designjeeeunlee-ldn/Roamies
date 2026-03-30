@@ -29,7 +29,7 @@
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": null
+      "favicon": "./favicon.png"
     },
     "experiments": {
       "typedRoutes": true

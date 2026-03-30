@@ -10,12 +10,19 @@ import {
   StatusBar,
   Alert,
   Image,
+  Platform,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
-import MapView, { Marker, Callout } from 'react-native-maps';
+
+const IS_WEB = Platform.OS === 'web';
+let MapView: any = null, Marker: any = null, Callout: any = null;
+if (!IS_WEB) {
+  const Maps = require('react-native-maps');
+  MapView = Maps.default; Marker = Maps.Marker; Callout = Maps.Callout;
+}
 import { useApp } from '../../context/AppContext';
 import type { AppPhoto, Member } from '../../context/AppContext';
 import { savePhotoToDevice } from '../../lib/useSavePhoto';
@@ -209,6 +216,11 @@ export default function PhotosScreen() {
           )}
           <View style={{ height: 96 }} />
         </ScrollView>
+      ) : IS_WEB ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+          <Ionicons name="map-outline" size={48} color="#C4B5FD" />
+          <Text style={{ fontSize: 14, color: '#9CA3AF' }}>Map view available in the mobile app</Text>
+        </View>
       ) : (
         <MapView
           style={styles.map}

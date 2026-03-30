@@ -63,7 +63,7 @@ const INITIAL_REGION = {
 
 export default function MapScreen() {
   const router = useRouter();
-  const mapRef = useRef<MapView>(null);
+  const mapRef = useRef<any>(null);
   const [sharing, setSharing] = useState(true);
   const [selectedStop, setSelectedStop] = useState<string | null>('therme-zurzach');
   const [panelOpen, setPanelOpen] = useState(false);

@@ -28,63 +28,6 @@ import TripCalendar, { parseDatesLabel, TRIP_COLORS } from '../../components/Tri
 import ScreenHeader from '../../components/ScreenHeader';
 import { formatTripDates, tripCountdown } from '../../lib/dateFormat';
 
-const INITIAL_STOPS: Stop[] = [
-  {
-    id: 'stop-therme-zurzach',
-    time: '14:00',
-    place_name: 'Therme Zurzach',
-    category: 'spa',
-    description: 'Relax in pet-friendly outdoor thermal pools (40 min detour)',
-    hours_today: 'open',
-    duration_minutes: 90,
-    pet_friendly: true,
-    origin: 'ai_suggested',
-    highly_recommended: true,
-    cost: '$$',
-    sources: [{ name: 'Google Maps', score: 4.5, review_count: 2100, sponsored: false }],
-    ai_summary: {
-      history: 'Thermalbad Zurzach has been a healing destination since Roman times — the Romans called it Tenedo and built baths here over 2,000 years ago. The town of Bad Zurzach grew around its thermal springs.',
-      famous_for: 'Outdoor thermal pools rich in natural sulphur and minerals, known for muscle recovery and relaxation. The outdoor pools stay at 34–36°C year-round, even in snow.',
-      local_tip: 'Bring your own towel to avoid rental fees. Arrive before 15:00 on weekends to skip queues. The rooftop pool has the best views of the Rhine valley.',
-    },
-  },
-  {
-    id: 'stop-lucerne',
-    time: '17:00',
-    place_name: 'Lucerne',
-    category: 'sight',
-    description: 'Chapel Bridge, old town, lakeside walk',
-    hours_today: 'open',
-    duration_minutes: 180,
-    pet_friendly: true,
-    origin: 'user_added',
-    cost: 'free',
-    sources: [{ name: 'Google Maps', score: 4.8, review_count: 55000, sponsored: false }],
-    ai_summary: {
-      history: 'Lucerne was founded in the 8th century as a fishing village and became a key crossing point on the Saint Gotthard trade route. The iconic Chapel Bridge (Kapellbrücke) dates to 1333, making it the oldest wooden covered bridge in Europe.',
-      famous_for: 'The Chapel Bridge and its Water Tower, the Lion Monument carved into a cliff face, and a stunning lakeside old town framed by the Alps. The lake itself — Lake Lucerne — is one of Switzerland\'s most scenic.',
-      local_tip: 'Cross the Chapel Bridge early morning or at dusk for the best light and fewest crowds. The Water Tower is free to view from outside. Skip the tourist restaurants on the bridge — walk two streets back for better local spots.',
-    },
-  },
-  {
-    id: 'stop-rhine-falls',
-    time: '11:00',
-    place_name: 'Rhine Falls',
-    category: 'sight',
-    description: "Circular path walk around Europe's largest waterfall — dog friendly",
-    hours_today: 'open',
-    duration_minutes: 60,
-    pet_friendly: true,
-    origin: 'user_added',
-    cost: 'free',
-    sources: [{ name: 'Google Maps', score: 4.7, review_count: 18400, sponsored: false }],
-    ai_summary: {
-      history: 'Rhine Falls formed roughly 14,000–17,000 years ago at the end of the last Ice Age when the Rhine river carved through hard Jurassic limestone. The falls have been a tourist destination since the 18th century — Mary Shelley and J.M.W. Turner both visited.',
-      famous_for: 'Europe\'s largest waterfall by volume — up to 600 cubic metres of water per second in summer. Boats take you right up to the central rock for a dramatic close-up. A circular cliff path gives views from all angles.',
-      local_tip: 'The falls are most powerful June–July when snowmelt peaks. Park at Schloss Laufen (castle side) for the best top-down viewpoint and skip the queues at the boat ticket kiosks by buying online.',
-    },
-  },
-];
 
 type StopState = 'upcoming' | 'done' | 'skipped';
 
@@ -121,11 +64,8 @@ export default function TodayScreen() {
     uploadPhoto,
   } = useApp();
 
-  // Demo-mode local stops (used when no real trip exists)
-  const [localStops, setLocalStops] = useState<Stop[]>(INITIAL_STOPS);
-  const [stopStates, setStopStates] = useState<Record<string, StopState>>(
-    () => Object.fromEntries(INITIAL_STOPS.map((s) => [s.id, 'upcoming'])),
-  );
+  const [localStops, setLocalStops] = useState<Stop[]>([]);
+  const [stopStates, setStopStates] = useState<Record<string, StopState>>({});
 
   const hasRealTrip = !!activeTrip && !tripLoading;
 

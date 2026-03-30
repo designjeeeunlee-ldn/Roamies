@@ -78,13 +78,6 @@ const CATEGORY_META: Record<ExpenseCategory, { icon: string; color: string; bg: 
 
 const ALL_IDS = MEMBERS.map((m) => m.id);
 
-const INITIAL_EXPENSES: Expense[] = [
-  { id: 'e1', title: 'Fondue dinner',          amount: 112.50, paidBy: 'jee',    splitWith: ALL_IDS,                         category: 'food',          date: 'Apr 3' },
-  { id: 'e2', title: 'Train to Lucerne',       amount:  84.00, paidBy: 'ben',    splitWith: ALL_IDS,                         category: 'transport',     date: 'Apr 4' },
-  { id: 'e3', title: 'Therme Zurzach entry',   amount:  64.00, paidBy: 'eliska', splitWith: ['jee', 'ben', 'eliska'],        category: 'activity',      date: 'Apr 4' },
-  { id: 'e4', title: 'Hotel Luzern (2 nights)',amount: 320.00, paidBy: 'david',  splitWith: ALL_IDS,                         category: 'accommodation', date: 'Apr 4' },
-  { id: 'e5', title: 'Breakfast at Markt',     amount:  48.00, paidBy: 'jee',    splitWith: ALL_IDS,                         category: 'food',          date: 'Apr 5' },
-];
 
 const MY_ID = 'jee';
 
@@ -325,12 +318,12 @@ export default function GroupScreen() {
   const [petFriendly, setPetFriendly] = useState(true);
   const [myVote, setMyVote] = useState<string | null>(null);
 
-  // Use real data when trip exists, otherwise fall back to demo data
   const hasRealTrip = !!activeTrip;
-  const members = hasRealTrip ? liveMembers : MEMBERS as unknown as typeof liveMembers;
-  const expenses: Expense[] = hasRealTrip
-    ? liveExpenses.map((e) => ({ id: e.id, title: e.title, amount: e.amount, paidBy: e.paidBy, splitWith: e.splitWith, category: e.category, date: e.date }))
-    : INITIAL_EXPENSES;
+  const members = liveMembers;
+  const expenses: Expense[] = liveExpenses.map((e) => ({
+    id: e.id, title: e.title, amount: e.amount,
+    paidBy: e.paidBy, splitWith: e.splitWith, category: e.category, date: e.date,
+  }));
 
   // The current user's ID for "me" in balance calculations
   const MY_ID_LIVE = userId ?? MY_ID;
@@ -706,24 +699,31 @@ export default function GroupScreen() {
             </View>
           </View>
           <View style={styles.activityCard}>
-            {ACTIVITY.map((item, index) => (
-              <View key={item.id}>
-                <View style={styles.activityRow}>
-                  <View style={[styles.activityAvatar, { backgroundColor: item.color }]}>
-                    <Text style={styles.activityAvatarText}>{item.initials}</Text>
-                  </View>
-                  <Text style={styles.activityText} numberOfLines={2}>
-                    <Text style={styles.activityName}>{item.initials === 'JE' ? 'You' : item.initials} </Text>
-                    {item.action}
-                  </Text>
-                  <View style={styles.activityRight}>
-                    <Ionicons name={item.icon as any} size={16} color={item.iconColor} />
-                    <Text style={styles.activityTime}>{item.time}</Text>
-                  </View>
-                </View>
-                {index < ACTIVITY.length - 1 && <View style={styles.activityDivider} />}
+            {!hasRealTrip ? (
+              <View style={{ paddingVertical: 20, alignItems: 'center', gap: 6 }}>
+                <Ionicons name="pulse-outline" size={28} color="#C4B5FD" />
+                <Text style={{ fontSize: 13, color: '#9CA3AF' }}>Activity will appear once you join a trip</Text>
               </View>
-            ))}
+            ) : (
+              ACTIVITY.map((item, index) => (
+                <View key={item.id}>
+                  <View style={styles.activityRow}>
+                    <View style={[styles.activityAvatar, { backgroundColor: item.color }]}>
+                      <Text style={styles.activityAvatarText}>{item.initials}</Text>
+                    </View>
+                    <Text style={styles.activityText} numberOfLines={2}>
+                      <Text style={styles.activityName}>{item.initials === 'JE' ? 'You' : item.initials} </Text>
+                      {item.action}
+                    </Text>
+                    <View style={styles.activityRight}>
+                      <Ionicons name={item.icon as any} size={16} color={item.iconColor} />
+                      <Text style={styles.activityTime}>{item.time}</Text>
+                    </View>
+                  </View>
+                  {index < ACTIVITY.length - 1 && <View style={styles.activityDivider} />}
+                </View>
+              ))
+            )}
           </View>
         </View>
 

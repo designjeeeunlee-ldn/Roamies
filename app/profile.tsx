@@ -17,11 +17,6 @@ const STATUS_OPTIONS: { id: TravelStatus; label: string; icon: string; color: st
   { id: 'home', label: 'At Home', icon: 'home', color: '#10B981' },
 ];
 
-const PAST_TRIPS = [
-  { id: '1', name: 'Swiss Summer Tour', dates: 'Apr 2 – Apr 7, 2026', stops: 8, photos: 42, countries: ['CH', 'FR'] },
-  { id: '2', name: 'Kyoto in Autumn', dates: 'Nov 10 – Nov 18, 2025', stops: 12, photos: 87, countries: ['JP'] },
-  { id: '3', name: 'Portugal Road Trip', dates: 'Jul 4 – Jul 14, 2025', stops: 9, photos: 65, countries: ['PT'] },
-];
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -254,7 +249,7 @@ export default function ProfileScreen() {
             <Text style={styles.sectionTitle}>Past Travels</Text>
           </View>
 
-          {pastTrips.length === 0 && PAST_TRIPS.length === 0 ? (
+          {pastTrips.length === 0 ? (
             <View style={styles.emptyTripsCard}>
               <Ionicons name="map-outline" size={24} color="#6B3FA0" />
               <Text style={styles.emptyTripsText}>No past trips yet</Text>
@@ -262,49 +257,28 @@ export default function ProfileScreen() {
             </View>
           ) : (
             <View style={styles.tripsList}>
-              {(pastTrips.length > 0 ? pastTrips : PAST_TRIPS).map((trip, idx) => {
-                const isReal = pastTrips.length > 0;
+              {pastTrips.map((trip, idx) => {
                 const color = TRIP_COLORS[idx % TRIP_COLORS.length];
-                const datesLabel = 'dates_label' in trip ? trip.dates_label : (trip as any).dates;
+                const datesLabel = trip.dates_label ?? '';
                 return (
-                  <View key={trip.id} style={styles.pastTripCard}>
+                  <TouchableOpacity
+                    key={trip.id}
+                    style={styles.pastTripCard}
+                    activeOpacity={0.8}
+                    onPress={() =>
+                      router.push({
+                        pathname: '/past-trip-route',
+                        params: { id: trip.id, name: trip.name, dates: datesLabel },
+                      })
+                    }
+                  >
                     <View style={[styles.tripBar, { backgroundColor: color }]} />
                     <View style={styles.tripInfo}>
                       <Text style={styles.tripName}>{trip.name}</Text>
                       {!!datesLabel && <Text style={styles.tripDates}>{datesLabel}</Text>}
-                      {'stops' in trip && (
-                        <View style={styles.tripMeta}>
-                          <View style={styles.tripMetaItem}>
-                            <Ionicons name="location-outline" size={12} color="#9CA3AF" />
-                            <Text style={styles.tripMetaText}>{(trip as any).stops} stops</Text>
-                          </View>
-                          <View style={styles.tripMetaItem}>
-                            <Ionicons name="images-outline" size={12} color="#9CA3AF" />
-                            <Text style={styles.tripMetaText}>{(trip as any).photos} photos</Text>
-                          </View>
-                        </View>
-                      )}
                     </View>
-
-                    {/* Route map button — only for real DB trips */}
-                    {isReal && (
-                      <TouchableOpacity
-                        style={styles.routeBtn}
-                        activeOpacity={0.8}
-                        onPress={() =>
-                          router.push({
-                            pathname: '/past-trip-route',
-                            params: { id: trip.id, name: trip.name, dates: datesLabel ?? '' },
-                          })
-                        }
-                      >
-                        <Ionicons name="map" size={15} color="#6B3FA0" />
-                        <Text style={styles.routeBtnText}>Route</Text>
-                      </TouchableOpacity>
-                    )}
-
                     <Ionicons name="chevron-forward" size={16} color="#D1D5DB" />
-                  </View>
+                  </TouchableOpacity>
                 );
               })}
             </View>

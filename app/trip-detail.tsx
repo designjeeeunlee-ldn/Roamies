@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  Platform,
   Image,
   Dimensions,
   Modal,
@@ -218,16 +219,18 @@ export default function TripDetailScreen() {
   }, [id]);
 
   const deleteStop = (stopId: string) => {
-    Alert.alert('Delete stop', 'Remove this stop from the itinerary?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete', style: 'destructive',
-        onPress: async () => {
-          const { error } = await supabase.from('stops').delete().eq('id', stopId);
-          if (!error) setStops((prev) => prev.filter((s) => s.id !== stopId));
-        },
-      },
-    ]);
+    const doDelete = async () => {
+      const { error } = await supabase.from('stops').delete().eq('id', stopId);
+      if (!error) setStops((prev) => prev.filter((s) => s.id !== stopId));
+    };
+    if (Platform.OS === 'web') {
+      if (window.confirm('Remove this stop from the itinerary?')) doDelete();
+    } else {
+      Alert.alert('Delete stop', 'Remove this stop from the itinerary?', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: doDelete },
+      ]);
+    }
   };
 
   const grouped = groupByDate(stops);

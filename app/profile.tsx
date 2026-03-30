@@ -40,22 +40,22 @@ export default function ProfileScreen() {
   });
 
   const handleDeleteTrip = (tripId: string, tripName: string) => {
-    Alert.alert(
-      'Delete trip',
-      `Remove "${tripName}" and all its stops? This cannot be undone.`,
-      [
+    const doDelete = async () => {
+      try {
+        await deleteTrip(tripId);
+      } catch (e: any) {
+        const msg = e?.message ?? 'Something went wrong. Try again.';
+        if (Platform.OS === 'web') { window.alert(msg); } else { Alert.alert('Could not delete', msg); }
+      }
+    };
+    if (Platform.OS === 'web') {
+      if (window.confirm(`Remove "${tripName}" and all its stops? This cannot be undone.`)) doDelete();
+    } else {
+      Alert.alert('Delete trip', `Remove "${tripName}" and all its stops? This cannot be undone.`, [
         { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete', style: 'destructive', onPress: async () => {
-            try {
-              await deleteTrip(tripId);
-            } catch (e: any) {
-              Alert.alert('Could not delete', e?.message ?? 'Something went wrong. Try again.');
-            }
-          }
-        },
-      ]
-    );
+        { text: 'Delete', style: 'destructive', onPress: doDelete },
+      ]);
+    }
   };
 
   const [status, setStatus] = useState<TravelStatus>('on_trip');
@@ -345,10 +345,14 @@ export default function ProfileScreen() {
               style={styles.actionRow}
               activeOpacity={0.7}
               onPress={() => {
-                Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-                  { text: 'Cancel', style: 'cancel' },
-                  { text: 'Sign Out', style: 'destructive', onPress: () => supabase.auth.signOut() },
-                ]);
+                if (Platform.OS === 'web') {
+                  if (window.confirm('Are you sure you want to sign out?')) supabase.auth.signOut();
+                } else {
+                  Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Sign Out', style: 'destructive', onPress: () => supabase.auth.signOut() },
+                  ]);
+                }
               }}
             >
               <View style={[styles.actionIconCircle, { backgroundColor: '#FEF2F2' }]}>
@@ -450,10 +454,16 @@ export default function ProfileScreen() {
             <TouchableOpacity
               style={profileModalStyles.deleteBtn}
               activeOpacity={0.85}
-              onPress={() => Alert.alert('Delete Account', 'This will permanently delete your account and all data. This cannot be undone.', [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'Delete', style: 'destructive', onPress: () => supabase.auth.signOut() },
-              ])}
+              onPress={() => {
+                if (Platform.OS === 'web') {
+                  if (window.confirm('This will permanently delete your account and all data. This cannot be undone.')) supabase.auth.signOut();
+                } else {
+                  Alert.alert('Delete Account', 'This will permanently delete your account and all data. This cannot be undone.', [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Delete', style: 'destructive', onPress: () => supabase.auth.signOut() },
+                  ]);
+                }
+              }}
             >
               <Text style={profileModalStyles.deleteBtnText}>Delete Account</Text>
             </TouchableOpacity>

@@ -13,7 +13,6 @@ import {
   Modal,
   TextInput,
   KeyboardAvoidingView,
-  Platform,
   Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';

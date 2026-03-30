@@ -50,7 +50,15 @@ export default function ProfileScreen() {
       `Remove "${tripName}" and all its stops? This cannot be undone.`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete', style: 'destructive', onPress: () => deleteTrip(tripId) },
+        {
+          text: 'Delete', style: 'destructive', onPress: async () => {
+            try {
+              await deleteTrip(tripId);
+            } catch (e: any) {
+              Alert.alert('Could not delete', e?.message ?? 'Something went wrong. Try again.');
+            }
+          }
+        },
       ]
     );
   };

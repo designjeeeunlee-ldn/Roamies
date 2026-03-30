@@ -13,6 +13,8 @@ import {
   Animated,
   useWindowDimensions,
   Alert,
+  Share,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -22,6 +24,7 @@ import ScreenHeader from '../../components/ScreenHeader';
 import { formatTripDates, tripCountdown } from '../../lib/dateFormat';
 import { askClaude } from '../../lib/claude';
 import type { ClaudeMessage } from '../../lib/claude';
+import { supabase } from '../../lib/supabase';
 
 // ── Members ───────────────────────────────────────────────────────────────────
 
@@ -320,7 +323,7 @@ export default function GroupScreen() {
   } = useApp();
 
   const [petFriendly, setPetFriendly] = useState(true);
-  const [myVote, setMyVote] = useState<string | null>('iseltwald');
+  const [myVote, setMyVote] = useState<string | null>(null);
 
   // Use real data when trip exists, otherwise fall back to demo data
   const hasRealTrip = !!activeTrip;
@@ -424,6 +427,7 @@ export default function GroupScreen() {
   const [editValue, setEditValue] = useState('');
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteSent, setInviteSent] = useState(false);
+  const [inviteSending, setInviteSending] = useState(false);
 
   // Derive trip display values from context
   const displayTripName = activeTrip?.name ?? 'Swiss Summer Tour';
@@ -431,10 +435,33 @@ export default function GroupScreen() {
 
   const TRIP_LINK = 'roamies.app/swiss-tour-2026';
 
-  const handleSendInvite = () => {
-    if (!inviteEmail.trim()) return;
-    setInviteSent(true);
-    setTimeout(() => { setInviteSent(false); setInviteEmail(''); setShowInvite(false); }, 1800);
+  const handleSendInvite = async () => {
+    const email = inviteEmail.trim().toLowerCase();
+    if (!email || inviteSending) return;
+    setInviteSending(true);
+    try {
+      // Send a magic-link sign-in email — recipient clicks it to open the app
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: { shouldCreateUser: true },
+      });
+      if (error) throw error;
+      // Record pending invite so we can add them to the trip on sign-in
+      if (activeTrip) {
+        await supabase.from('trip_invites').upsert({
+          trip_id: activeTrip.id,
+          invited_email: email,
+          invited_by: userId,
+          status: 'pending',
+        });
+      }
+      setInviteSent(true);
+      setTimeout(() => { setInviteSent(false); setInviteEmail(''); setShowInvite(false); }, 2500);
+    } catch (e: any) {
+      Alert.alert('Could not send invite', e?.message ?? 'Check the email and try again.');
+    } finally {
+      setInviteSending(false);
+    }
   };
 
   const handleShareLink = async () => {
@@ -460,7 +487,38 @@ export default function GroupScreen() {
   const balances = computeBalancesFor(expenses, MY_ID_LIVE);
   const netBalance = Object.values(balances).reduce((s, v) => s + v, 0);
 
-  const handleVote = (optionId: string) => setMyVote((prev) => (prev === optionId ? null : optionId));
+  // Load persisted vote on mount
+  useEffect(() => {
+    if (!activeTrip || !userId) return;
+    supabase
+      .from('trip_ai_votes')
+      .select('option_id')
+      .eq('trip_id', activeTrip.id)
+      .eq('user_id', userId)
+      .eq('decision_key', 'main-activity-sunday')
+      .maybeSingle()
+      .then(({ data }) => { if (data) setMyVote(data.option_id); });
+  }, [activeTrip?.id, userId]);
+
+  const handleVote = async (optionId: string) => {
+    const next = myVote === optionId ? null : optionId;
+    setMyVote(next);
+    if (!activeTrip || !userId) return;
+    if (next) {
+      await supabase.from('trip_ai_votes').upsert({
+        trip_id: activeTrip.id,
+        user_id: userId,
+        decision_key: 'main-activity-sunday',
+        option_id: next,
+      }, { onConflict: 'trip_id,user_id,decision_key' });
+    } else {
+      await supabase.from('trip_ai_votes')
+        .delete()
+        .eq('trip_id', activeTrip.id)
+        .eq('user_id', userId)
+        .eq('decision_key', 'main-activity-sunday');
+    }
+  };
 
   const toggleSplit = (id: string) => {
     setNewSplit((prev) =>
@@ -518,17 +576,27 @@ export default function GroupScreen() {
               </View>
               <Text style={styles.aiPanelTitle}>Plan with AI ✦</Text>
             </View>
-            <TouchableOpacity
-              onPress={() => setChatOpen((v) => !v)}
-              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-              activeOpacity={0.7}
-            >
-              <Ionicons
-                name={chatOpen ? 'chevron-up' : 'chevron-down'}
-                size={20}
-                color="#6B3FA0"
-              />
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <TouchableOpacity
+                onPress={() => router.push('/(tabs)/ai')}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                activeOpacity={0.7}
+                style={{ backgroundColor: '#EDE9FE', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 }}
+              >
+                <Text style={{ fontSize: 11, fontWeight: '600', color: '#6B3FA0' }}>Full chat</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setChatOpen((v) => !v)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name={chatOpen ? 'chevron-up' : 'chevron-down'}
+                  size={20}
+                  color="#6B3FA0"
+                />
+              </TouchableOpacity>
+            </View>
           </View>
 
           {/* Expanded content */}
@@ -770,7 +838,15 @@ export default function GroupScreen() {
                     {fmt(Math.abs(bal), currency)}
                   </Text>
                   {owesMe && (
-                    <TouchableOpacity style={styles.remindBtn} activeOpacity={0.8}>
+                    <TouchableOpacity
+                      style={styles.remindBtn}
+                      activeOpacity={0.8}
+                      onPress={() =>
+                        Share.share({
+                          message: `Hey ${member.name}! Just a reminder — you owe ${fmt(Math.abs(bal), currency)} on the ${activeTrip?.name ?? 'trip'} expenses. Let me know when you can settle up 🙏`,
+                        })
+                      }
+                    >
                       <Text style={styles.remindBtnText}>Remind</Text>
                     </TouchableOpacity>
                   )}
@@ -1105,13 +1181,16 @@ export default function GroupScreen() {
                 />
               </View>
               <TouchableOpacity
-                style={[styles.inviteSendBtn, (!inviteEmail.trim() || inviteSent) && styles.inviteSendBtnDisabled]}
+                style={[styles.inviteSendBtn, (!inviteEmail.trim() || inviteSent || inviteSending) && styles.inviteSendBtnDisabled]}
                 onPress={handleSendInvite}
                 activeOpacity={0.85}
+                disabled={!inviteEmail.trim() || inviteSent || inviteSending}
               >
                 {inviteSent
                   ? <Ionicons name="checkmark" size={18} color="#FFFFFF" />
-                  : <Text style={styles.inviteSendBtnText}>Send</Text>
+                  : inviteSending
+                    ? <ActivityIndicator size="small" color="#FFFFFF" />
+                    : <Text style={styles.inviteSendBtnText}>Send</Text>
                 }
               </TouchableOpacity>
             </View>

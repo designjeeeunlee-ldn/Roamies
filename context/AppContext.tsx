@@ -513,15 +513,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const deleteTrip = useCallback(async (id: string) => {
-    // Delete in dependency order
-    await supabase.from('expenses').delete().eq('trip_id', id);
-    await supabase.from('stops').delete().eq('trip_id', id);
-    await supabase.from('trip_members').delete().eq('trip_id', id);
-    await supabase.from('trips').delete().eq('id', id);
-    // Optimistically remove from local state immediately
+    // Delete in dependency order, bail on first hard error
+    const r1 = await supabase.from('expenses').delete().eq('trip_id', id);
+    if (r1.error) throw new Error(r1.error.message);
+    const r2 = await supabase.from('stops').delete().eq('trip_id', id);
+    if (r2.error) throw new Error(r2.error.message);
+    const r3 = await supabase.from('trip_members').delete().eq('trip_id', id);
+    if (r3.error) throw new Error(r3.error.message);
+    const r4 = await supabase.from('trips').delete().eq('id', id);
+    if (r4.error) throw new Error(r4.error.message);
+    // Remove from local state
     setAllTrips((prev) => prev.filter((t) => t.id !== id));
     setActiveTrip((prev) => (prev?.id === id ? null : prev));
-    // Reset activeTripId to trigger a full re-fetch so all tabs sync
     setActiveTripId((prev) => (prev === id ? null : prev));
   }, []);
 
